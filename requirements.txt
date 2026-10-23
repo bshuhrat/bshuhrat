@@ -1,0 +1,4 @@
+aiogram==3.31.0
+aiosqlite==0.22.1
+python-dotenv==1.2.4
+tzdata==2025.2
