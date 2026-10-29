@@ -41,3 +41,11 @@ def request_keyboard(req_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✍️ Ответить", callback_data=f"ans:{req_id}")]
         ]
     )
+
+
+def photo_fix_keyboard(fix_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📷 Отправить фото исправление", callback_data=f"fix:{fix_id}")]
+        ]
+    )

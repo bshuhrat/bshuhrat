@@ -10,6 +10,7 @@ from aiogram import Bot
 
 from .config import Config
 from .db import Database
+from .photofix import release_expired
 from .services import notify_admins, send_to_chat
 from .stats import full_report, participants, task_summary
 from .utils import fmt_dt, mention
@@ -61,7 +62,7 @@ async def check_daily_report(bot: Bot, db: Database, cfg: Config) -> None:
     if await db.get_setting("last_daily_report") == today:
         return
     await db.set_setting("last_daily_report", today)
-    if not await db.all_tasks():
+    if not await db.all_tasks() and not await db.done_photo_fixes():
         return
     report = await full_report(db, cfg)
     pending = len(await db.pending_submissions())
@@ -75,6 +76,7 @@ async def run_scheduler(bot: Bot, db: Database, cfg: Config) -> None:
         try:
             await check_deadlines(bot, db, cfg)
             await check_daily_report(bot, db, cfg)
+            await release_expired(bot, db, cfg)
         except Exception:  # планировщик не должен падать
             log.exception("Ошибка в планировщике")
         await asyncio.sleep(CHECK_INTERVAL)

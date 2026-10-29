@@ -14,6 +14,7 @@ class Config:
     daily_report_time: time
     timezone: ZoneInfo
     remind_before_hours: int
+    photo_fix_timeout_min: int
     db_path: str
 
 
@@ -40,5 +41,6 @@ def load_config() -> Config:
         daily_report_time=time(int(hh), int(mm)),
         timezone=ZoneInfo(os.getenv("TIMEZONE", "UTC")),
         remind_before_hours=int(os.getenv("REMIND_BEFORE_HOURS", "24")),
+        photo_fix_timeout_min=int(os.getenv("PHOTO_FIX_TIMEOUT_MIN", "60")),
         db_path=os.getenv("DB_PATH", "data/bot.db"),
     )

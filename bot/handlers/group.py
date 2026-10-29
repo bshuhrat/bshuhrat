@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from ..config import Config
 from ..db import Database
+from ..photofix import handle_photo, on_fix_button
 from ..services import accept_submission, close_task, publish_task, register_request
 from ..stats import task_summary
 from ..utils import (
@@ -31,7 +32,8 @@ HELP_MEMBER = """🤖 <b>Команды бота</b>
 /faq — частые вопросы темы
 /ask <i>текст</i> — задать вопрос администратору
 /my — моя статистика
-Сдать задание — ответьте (reply) на сообщение с заданием или напишите <code>#сдаю</code> в теме с одним открытым заданием."""
+Сдать задание — ответьте (reply) на сообщение с заданием или напишите <code>#сдаю</code> в теме с одним открытым заданием.
+В теме фото-исправлений нажмите «📷 Отправить фото исправление» под фото и пришлите исправленное фото."""
 
 HELP_ADMIN = """
 
@@ -42,6 +44,7 @@ HELP_ADMIN = """
 /faq_del <i>ключевое слово</i> — удалить автоответ
 /task <i>название | описание | дедлайн</i> — новое задание в этой теме
    дедлайн: <code>25.10.2026 18:00</code> или <code>25.10</code>
+/photo_topic — сделать текущую тему темой фото-исправлений (<code>/photo_topic off</code> — выключить)
 /close <i>id</i> — закрыть задание и получить итог
 /stat <i>id</i> — итог по заданию (придёт в личку)"""
 
@@ -230,6 +233,18 @@ async def cmd_faq_del(message: Message, command: CommandObject, db: Database, cf
     await message.reply("🗑 Удалено." if ok else "Такого автоответа нет.")
 
 
+@router.message(Command("photo_topic"))
+async def cmd_photo_topic(message: Message, command: CommandObject, db: Database, cfg: Config) -> None:
+    if not is_admin(message, cfg):
+        return
+    enabled = (command.args or "").strip().lower() not in ("off", "выкл", "0")
+    await db.set_photo_mode(message.chat.id, thread_of(message), enabled)
+    await message.reply(
+        "✅ Теперь под каждым фото в этой теме будет кнопка «📷 Отправить фото исправление»."
+        if enabled else "Режим фото-исправлений в этой теме выключен."
+    )
+
+
 @router.message(Command("task"))
 async def cmd_task(
     message: Message, command: CommandObject, db: Database, cfg: Config, bot: Bot
@@ -318,19 +333,24 @@ async def cb_who(call: CallbackQuery, db: Database) -> None:
     await call.answer(text[:200], show_alert=True)
 
 
-# ---------- сдачи и автоответы (должны идти последними) ----------
+@router.callback_query(F.data.startswith("fix:"))
+async def cb_fix(call: CallbackQuery, db: Database, cfg: Config, bot: Bot) -> None:
+    await on_fix_button(call, db, cfg, bot)
 
-@router.message(F.reply_to_message)
-async def on_reply(message: Message, db: Database, cfg: Config, bot: Bot) -> None:
-    task = await db.task_by_message(message.chat.id, message.reply_to_message.message_id)
-    if task and not is_admin(message, cfg):
-        await accept_submission(message, task, db, cfg, bot)
-        return
-    await auto_answer(message, db, cfg, bot)
 
+# ---------- сдачи, фото и автоответы (должны идти последними) ----------
 
 @router.message()
 async def on_message(message: Message, db: Database, cfg: Config, bot: Bot) -> None:
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if message.reply_to_message and not is_admin(message, cfg):
+        task = await db.task_by_message(message.chat.id, message.reply_to_message.message_id)
+        if task:
+            await accept_submission(message, task, db, cfg, bot)
+            return
+    if await handle_photo(message, db, cfg, bot):
+        return
     await auto_answer(message, db, cfg, bot)
 
 

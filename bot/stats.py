@@ -57,7 +57,7 @@ async def task_summary(db: Database, cfg: Config, task) -> str:
 
 async def full_report(db: Database, cfg: Config) -> str:
     tasks = await db.all_tasks()
-    if not tasks:
+    if not tasks and not await db.done_photo_fixes():
         return "📊 Пока нет ни одного задания."
     subs = await db.all_submissions()
 
@@ -118,7 +118,19 @@ async def full_report(db: Database, cfg: Config) -> str:
                 f"баллы: {u['points']}, ср.: {avg}" + (f" {' '.join(extra)}" if extra else "")
             )
 
-    lines += ["", "📋 <b>По заданиям</b>"]
+    fixes = await db.done_photo_fixes()
+    if fixes:
+        per_fixer: dict[int, list] = defaultdict(list)
+        for f in fixes:
+            per_fixer[f["fixer_id"]].append(f["fixer_name"])
+        lines += ["", f"🛠 <b>Фото-исправления</b> (всего {len(fixes)})"]
+        lines += [
+            f"• {escape(names[-1])} — {len(names)}"
+            for names in sorted(per_fixer.values(), key=len, reverse=True)
+        ]
+
+    if tasks:
+        lines += ["", "📋 <b>По заданиям</b>"]
     subs_by_task: dict[int, list] = defaultdict(list)
     for s in subs:
         subs_by_task[s["task_id"]].append(s)

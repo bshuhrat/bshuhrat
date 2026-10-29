@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS topics (
     thread_id  INTEGER NOT NULL,
     name       TEXT    NOT NULL,
     welcome    TEXT,
+    photo_mode INTEGER NOT NULL DEFAULT 0,   -- 1: тема фото-исправлений
     PRIMARY KEY (chat_id, thread_id)
 );
 
@@ -81,6 +82,24 @@ CREATE TABLE IF NOT EXISTS requests (
     status      TEXT    NOT NULL DEFAULT 'open',  -- open | answered
     answer      TEXT,
     created_at  TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS photo_fixes (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id           INTEGER NOT NULL,
+    thread_id         INTEGER NOT NULL,
+    orig_message_id   INTEGER NOT NULL,
+    orig_file_id      TEXT    NOT NULL,
+    orig_caption      TEXT,
+    orig_user_id      INTEGER NOT NULL,
+    orig_name         TEXT    NOT NULL,
+    button_message_id INTEGER,
+    status            TEXT    NOT NULL DEFAULT 'open',  -- open | claimed | done
+    fixer_id          INTEGER,
+    fixer_name        TEXT,
+    claimed_at        TEXT,
+    fix_message_id    INTEGER,
+    done_at           TEXT
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -350,6 +369,85 @@ class Database:
 
     async def open_requests(self) -> list[aiosqlite.Row]:
         return await self._all("SELECT * FROM requests WHERE status = 'open' ORDER BY id")
+
+    # ---------- фото-исправления ----------
+    async def set_photo_mode(self, chat_id: int, thread_id: int, enabled: bool) -> None:
+        await self._exec(
+            "INSERT INTO topics (chat_id, thread_id, name, photo_mode) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (chat_id, thread_id) DO UPDATE SET photo_mode = excluded.photo_mode",
+            (chat_id, thread_id, f"Тема {thread_id}", int(enabled)),
+        )
+
+    async def is_photo_topic(self, chat_id: int, thread_id: int) -> bool:
+        row = await self.get_topic(chat_id, thread_id)
+        return bool(row and row["photo_mode"])
+
+    async def create_photo_fix(
+        self, chat_id: int, thread_id: int, message_id: int, file_id: str,
+        caption: str | None, user_id: int, name: str,
+    ) -> int:
+        cur = await self._exec(
+            "INSERT INTO photo_fixes (chat_id, thread_id, orig_message_id, orig_file_id, "
+            "orig_caption, orig_user_id, orig_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, thread_id, message_id, file_id, caption, user_id, name),
+        )
+        return cur.lastrowid
+
+    async def set_fix_button(self, fix_id: int, message_id: int) -> None:
+        await self._exec(
+            "UPDATE photo_fixes SET button_message_id = ? WHERE id = ?", (message_id, fix_id)
+        )
+
+    async def get_photo_fix(self, fix_id: int) -> aiosqlite.Row | None:
+        return await self._one("SELECT * FROM photo_fixes WHERE id = ?", (fix_id,))
+
+    async def claim_photo_fix(self, fix_id: int, user_id: int, name: str) -> bool:
+        """Атомарно закрепляет исправление за участником. False — кто-то успел раньше."""
+        cur = await self._exec(
+            "UPDATE photo_fixes SET status = 'claimed', fixer_id = ?, fixer_name = ?, "
+            "claimed_at = ? WHERE id = ? AND status = 'open'",
+            (user_id, name, now_iso(), fix_id),
+        )
+        return cur.rowcount > 0
+
+    async def claimed_fix_for(
+        self, chat_id: int, thread_id: int, user_id: int, button_message_id: int | None = None
+    ) -> aiosqlite.Row | None:
+        """Ожидающее исправление участника (по сообщению с кнопкой или последнее)."""
+        if button_message_id is not None:
+            row = await self._one(
+                "SELECT * FROM photo_fixes WHERE chat_id = ? AND button_message_id = ? "
+                "AND status = 'claimed' AND fixer_id = ?",
+                (chat_id, button_message_id, user_id),
+            )
+            if row:
+                return row
+        return await self._one(
+            "SELECT * FROM photo_fixes WHERE chat_id = ? AND thread_id = ? AND fixer_id = ? "
+            "AND status = 'claimed' ORDER BY claimed_at DESC LIMIT 1",
+            (chat_id, thread_id, user_id),
+        )
+
+    async def complete_photo_fix(self, fix_id: int, message_id: int) -> None:
+        await self._exec(
+            "UPDATE photo_fixes SET status = 'done', fix_message_id = ?, done_at = ? WHERE id = ?",
+            (message_id, now_iso(), fix_id),
+        )
+
+    async def expired_photo_fixes(self, before_iso: str) -> list[aiosqlite.Row]:
+        return await self._all(
+            "SELECT * FROM photo_fixes WHERE status = 'claimed' AND claimed_at < ?", (before_iso,)
+        )
+
+    async def release_photo_fix(self, fix_id: int) -> None:
+        await self._exec(
+            "UPDATE photo_fixes SET status = 'open', fixer_id = NULL, fixer_name = NULL, "
+            "claimed_at = NULL WHERE id = ? AND status = 'claimed'",
+            (fix_id,),
+        )
+
+    async def done_photo_fixes(self) -> list[aiosqlite.Row]:
+        return await self._all("SELECT * FROM photo_fixes WHERE status = 'done'")
 
     # ---------- настройки ----------
     async def get_setting(self, key: str) -> str | None:
