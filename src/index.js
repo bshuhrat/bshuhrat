@@ -7,8 +7,11 @@ import { Telegram } from "./telegram.js";
 
 let botUsername = null;
 
+// Токен без случайных пробелов и переносов строки при вставке
+const tokenOf = (env) => String(env.BOT_TOKEN || "").trim();
+
 function loadConfig(env) {
-  if (!env.BOT_TOKEN) throw new Error("Не задан секрет BOT_TOKEN");
+  if (!tokenOf(env)) throw new Error("Не задан секрет BOT_TOKEN");
   const adminIds = new Set(
     String(env.ADMIN_IDS || "").split(",").map((s) => s.trim()).filter(Boolean).map(Number),
   );
@@ -28,7 +31,7 @@ async function makeContext(env) {
   const db = new Database(env.DB);
   await db.init();
   if (!botUsername) botUsername = await db.getSetting("bot_username");
-  return { db, tg: new Telegram(env.BOT_TOKEN), cfg: loadConfig(env) };
+  return { db, tg: new Telegram(tokenOf(env)), cfg: loadConfig(env) };
 }
 
 // Секрет вебхука выводится из токена — отдельная настройка не нужна
@@ -68,7 +71,7 @@ async function setup(env, origin) {
   await ctx.db.setSetting("bot_username", me.username);
   await ctx.tg.call("setWebhook", {
     url: `${origin}/webhook`,
-    secret_token: await webhookSecret(env.BOT_TOKEN),
+    secret_token: await webhookSecret(tokenOf(env)),
     allowed_updates: ["message", "callback_query"],
     drop_pending_updates: true,
   });
@@ -85,23 +88,57 @@ async function setup(env, origin) {
 }
 
 // Автоподключение без браузера: если задана переменная WORKER_URL, планировщик
-// сам регистрирует вебхук (полезно, когда workers.dev не открывается у провайдера)
+// сам регистрирует вебхук (полезно, когда workers.dev не открывается у провайдера).
+// Итог сохраняется в setup_status — бот показывает его в ответ на /start.
 async function autoSetup(env) {
-  if (!env.WORKER_URL || !env.BOT_TOKEN) return;
-  let origin;
-  try {
-    const raw = env.WORKER_URL.trim();
-    origin = new URL(/^https?:\/\//.test(raw) ? raw : `https://${raw}`).origin;
-  } catch {
-    console.error("Неверный WORKER_URL:", env.WORKER_URL);
-    return;
-  }
   const db = new Database(env.DB);
   await db.init();
-  const marker = await webhookSecret(env.BOT_TOKEN + "|" + origin);
+  const raw = String(env.WORKER_URL || "").trim();
+  if (!raw) {
+    await db.setSetting("setup_status", "не задана переменная WORKER_URL");
+    return;
+  }
+  let origin;
+  try {
+    origin = new URL(/^https?:\/\//.test(raw) ? raw : `https://${raw}`).origin;
+  } catch {
+    await db.setSetting("setup_status", `неверный адрес в WORKER_URL: «${raw}»`);
+    return;
+  }
+  const marker = await webhookSecret(tokenOf(env) + "|" + origin);
   if ((await db.getSetting("auto_setup")) === marker) return;
-  console.log(await setup(env, origin));
-  await db.setSetting("auto_setup", marker);
+  try {
+    console.log(await setup(env, origin));
+    await db.setSetting("auto_setup", marker);
+    await db.setSetting("setup_status", "ok");
+  } catch (e) {
+    await db.setSetting("setup_status", `Telegram не принял адрес ${origin}: ${e.message}`);
+  }
+}
+
+// Резервный режим: пока вебхук не подключён, забираем сообщения сами (задержка до минуты)
+async function pollUpdates(env) {
+  const ctx = await makeContext(env);
+  const info = await ctx.tg.call("getWebhookInfo");
+  if (info.url) return;
+  if (!botUsername) {
+    botUsername = (await ctx.tg.call("getMe")).username;
+    ctx.cfg.botUsername = botUsername;
+    await ctx.db.setSetting("bot_username", botUsername);
+  }
+  ctx.polling = true;
+  const offset = Number((await ctx.db.getSetting("poll_offset")) || 0);
+  const updates = await ctx.tg.call("getUpdates", {
+    offset, timeout: 30, limit: 10, allowed_updates: ["message", "callback_query"],
+  });
+  for (const update of updates) {
+    await ctx.db.setSetting("poll_offset", String(update.update_id + 1));
+    try {
+      await handleUpdate(ctx, update);
+    } catch (e) {
+      console.error("Ошибка обработки обновления:", e);
+    }
+  }
 }
 
 const text = (body, status = 200) =>
@@ -113,7 +150,7 @@ export default {
 
     if (url.pathname === "/webhook" && request.method === "POST") {
       const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-      if (secret !== (await webhookSecret(env.BOT_TOKEN))) return text("forbidden", 403);
+      if (secret !== (await webhookSecret(tokenOf(env)))) return text("forbidden", 403);
       try {
         await handleUpdate(await makeContext(env), await request.json());
       } catch (e) {
@@ -124,8 +161,8 @@ export default {
     }
 
     if (url.pathname === "/setup") {
-      if (!env.BOT_TOKEN) return text("Сначала добавьте секрет BOT_TOKEN в настройках Worker.", 500);
-      if (url.searchParams.get("token") !== env.BOT_TOKEN) {
+      if (!tokenOf(env)) return text("Сначала добавьте секрет BOT_TOKEN в настройках Worker.", 500);
+      if ((url.searchParams.get("token") || "").trim() !== tokenOf(env)) {
         return text("Откройте адрес вида /setup?token=ВАШ_ТОКЕН_БОТА", 403);
       }
       try {
@@ -140,10 +177,12 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
-      try {
-        await autoSetup(env);
-      } catch (e) {
-        console.error("Автоподключение не удалось:", e);
+      for (const step of [autoSetup, pollUpdates]) {
+        try {
+          await step(env);
+        } catch (e) {
+          console.error(`${step.name}:`, e);
+        }
       }
       await runScheduled(await makeContext(env));
     })());

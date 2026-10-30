@@ -5,6 +5,10 @@ import { test } from "node:test";
 
 import worker from "../src/index.js";
 
+// Логи воркера мешают выводу тест-раннера
+console.log = () => {};
+console.warn = () => {};
+
 // --- имитация D1 поверх node:sqlite ---
 class FakeStmt {
   constructor(db, sql, params = []) { Object.assign(this, { db, sql, params }); }
@@ -24,13 +28,18 @@ const DB = {
 
 // --- имитация Telegram Bot API ---
 const calls = [];
+const tgState = { webhook: "", queue: [] };
 let nextId = 5000;
 globalThis.fetch = async (url, init) => {
   const method = url.split("/").pop();
   const params = init.body instanceof FormData ? Object.fromEntries(init.body) : JSON.parse(init.body);
   calls.push({ method, params });
   let result = true;
-  if (method === "getMe") result = { id: 1, is_bot: true, username: "test_bot" };
+  if (method === "setWebhook") tgState.webhook = params.url;
+  else if (method === "getWebhookInfo") result = { url: tgState.webhook, pending_update_count: 0 };
+  else if (method === "getUpdates") {
+    result = tgState.queue.filter((u) => u.update_id >= (params.offset || 0));
+  } else if (method === "getMe") result = { id: 1, is_bot: true, username: "test_bot" };
   else if (["sendMessage", "sendDocument"].includes(method)) {
     result = { message_id: nextId++, chat: { id: params.chat_id }, date: 0 };
   } else if (method === "copyMessage") result = { message_id: nextId++ };
@@ -229,6 +238,8 @@ test("напоминание и дедлайн", async () => {
 
 test("ежедневный отчёт — один раз в день", async () => {
   env.DAILY_REPORT_TIME = "00:00";
+  // более ранние прогоны cron могли уже отправить отчёт (зависит от текущего времени)
+  sqlite.prepare("DELETE FROM settings WHERE key = 'last_daily_report'").run();
   let cs = await during(runCron);
   const report = cs.find((c) => c.params.chat_id === 100 && /Ежедневный отчёт/.test(c.params.text || ""));
   assert.ok(report);
@@ -251,4 +262,28 @@ test("автоподключение по WORKER_URL без браузера", a
   cs = await during(runCron);
   assert.equal(one(cs, "setWebhook"), undefined, "повторно не подключает");
   delete env.WORKER_URL;
+});
+
+test("резервный режим без вебхука: бот сам забирает сообщения", async () => {
+  tgState.webhook = "";
+  env.WORKER_URL = "not a url %%%";
+  tgState.queue = [{ update_id: 900, message: {
+    message_id: nextId++, date: 0, chat: { id: 3, type: "private" }, from: SAMI, text: "/start",
+  } }];
+  let cs = await during(runCron);
+  const reply = cs.find((c) => c.method === "sendMessage" && c.params.chat_id === 3);
+  assert.match(reply.params.text, /Ваш Telegram ID: <code>3<\/code>/);
+  assert.match(reply.params.text, /резервном режиме[\s\S]*неверный адрес в WORKER_URL/);
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => c.method === "sendMessage" && c.params.chat_id === 3).length, 0,
+    "одно и то же сообщение не обрабатывается дважды");
+  delete env.WORKER_URL;
+});
+
+test("лишние пробелы в токене не мешают", async () => {
+  const res = await worker.fetch(new Request(`${ORIGIN}/webhook`, {
+    method: "POST", headers: { "X-Telegram-Bot-Api-Secret-Token": secret },
+    body: JSON.stringify({ update_id: updateId++ }),
+  }), { ...env, BOT_TOKEN: ` ${TOKEN}\n` });
+  assert.equal(res.status, 200);
 });

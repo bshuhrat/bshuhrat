@@ -24,7 +24,12 @@ export async function handlePrivateMessage(ctx, msg) {
   const command = parseCommand(msg, cfg.botUsername);
 
   if (command && ["start", "help", "id"].includes(command.cmd)) {
-    const idLine = `\n\n🆔 Ваш Telegram ID: <code>${msg.from.id}</code>`;
+    let idLine = `\n\n🆔 Ваш Telegram ID: <code>${msg.from.id}</code>`;
+    if (ctx.polling) {
+      const status = (await db.getSetting("setup_status")) || "вебхук ещё не подключён";
+      idLine += "\n\n⚠️ Бот работает в резервном режиме: отвечает с задержкой до минуты.\n" +
+        `Причина: ${esc(status)}`;
+    }
     await tg.send(chatId, isAdmin ? HELP + idLine :
       "👋 Привет! Я работаю в групповом чате: публикую задания, принимаю их сдачу " +
       "и отвечаю на вопросы. Напишите /help в группе, чтобы увидеть команды." + idLine +
