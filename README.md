@@ -29,7 +29,7 @@
    |---|---|---|
    | `BOT_TOKEN` | **Secret** | токен от BotFather |
    | `ADMIN_IDS` | Text | ваш ID (несколько — через запятую) |
-   | `TIMEZONE` | Text | `Asia/Tashkent` |
+   | `TIMEZONE` | Text | `Europe/Moscow` |
    | `DAILY_REPORT_TIME` | Text | `20:00` (необязательно) |
 
    Нажмите **Deploy / Save**.

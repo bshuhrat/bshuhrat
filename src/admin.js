@@ -23,10 +23,13 @@ export async function handlePrivateMessage(ctx, msg) {
   const isAdmin = cfg.adminIds.has(msg.from.id);
   const command = parseCommand(msg, cfg.botUsername);
 
-  if (command && ["start", "help"].includes(command.cmd)) {
-    await tg.send(chatId, isAdmin ? HELP :
+  if (command && ["start", "help", "id"].includes(command.cmd)) {
+    const idLine = `\n\n🆔 Ваш Telegram ID: <code>${msg.from.id}</code>`;
+    await tg.send(chatId, isAdmin ? HELP + idLine :
       "👋 Привет! Я работаю в групповом чате: публикую задания, принимаю их сдачу " +
-      "и отвечаю на вопросы. Напишите /help в группе, чтобы увидеть команды.");
+      "и отвечаю на вопросы. Напишите /help в группе, чтобы увидеть команды." + idLine +
+      (cfg.adminIds.size ? "" : "\n\nАдминистратор ещё не назначен: впишите этот ID в переменную " +
+        "<code>ADMIN_IDS</code> в настройках Cloudflare."));
     return;
   }
   if (!isAdmin) return;

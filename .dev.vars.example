@@ -1,4 +1,4 @@
 # Для локального запуска (wrangler dev): скопируйте в .dev.vars
 BOT_TOKEN=123456:ABC-your-token
 ADMIN_IDS=111111111
-TIMEZONE=Asia/Tashkent
+TIMEZONE=Europe/Moscow

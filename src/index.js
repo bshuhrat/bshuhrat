@@ -16,7 +16,7 @@ function loadConfig(env) {
   return {
     adminIds,
     groupId: env.GROUP_ID ? Number(env.GROUP_ID) : null,
-    timezone: env.TIMEZONE || "Asia/Tashkent",
+    timezone: env.TIMEZONE || "Europe/Moscow",
     dailyReportTime: `${hh.padStart(2, "0")}:${mm.padStart(2, "0")}`,
     remindBeforeHours: Number(env.REMIND_BEFORE_HOURS || 24),
     photoFixTimeoutMin: Number(env.PHOTO_FIX_TIMEOUT_MIN || 60),
@@ -78,7 +78,8 @@ async function setup(env, url) {
   await ctx.tg.call("setMyCommands", {
     commands: toCommands(PRIVATE_COMMANDS), scope: { type: "all_private_chats" },
   });
-  const admins = [...ctx.cfg.adminIds].join(", ") || "не указаны!";
+  const admins = [...ctx.cfg.adminIds].join(", ") ||
+    "не указаны — напишите боту /start, он пришлёт ваш ID, и впишите его в ADMIN_IDS";
   return `✅ Бот @${me.username} подключён.\nАдминистраторы: ${admins}\n` +
     `Часовой пояс: ${ctx.cfg.timezone}\nТеперь напишите боту /start в Telegram.`;
 }

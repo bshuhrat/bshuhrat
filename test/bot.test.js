@@ -236,3 +236,8 @@ test("ежедневный отчёт — один раз в день", async ()
   cs = await during(runCron);
   assert.equal(texts(cs).filter((t) => /Ежедневный отчёт/.test(t)).length, 0);
 });
+
+test("бот сообщает пользователю его ID", async () => {
+  const cs = await during(() => msg(SAMI, "/start", { chat: { id: 3, type: "private" } }));
+  assert.match(texts(cs)[0], /Ваш Telegram ID: <code>3<\/code>/);
+});
