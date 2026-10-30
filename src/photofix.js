@@ -89,33 +89,42 @@ export async function onFixButton(ctx, call) {
 
 async function finishFix(ctx, msg, fix) {
   await ctx.db.completePhotoFix(fix.id, msg.message_id);
+  const chatId = msg.chat.id;
   const fixer = fullName(msg.from);
+  const thanks = `🙏 Спасибо за исправление, ${mention(msg.from.id, fixer)}!`;
 
-  let origCaption = `📷 Оригинал — ${esc(fix.orig_name)}`;
-  if (fix.orig_caption) origCaption += `\n${esc(fix.orig_caption)}`;
-  let fixCaption = `✅ Исправление — ${esc(fixer)}`;
-  if (msg.caption) fixCaption += `\n${esc(msg.caption)}`;
+  // Одна подпись на весь альбом: кто прислал нарушение, кто исправил (выделен), спасибо
+  let caption = `📷 <b>Нарушение</b> — ${mention(fix.orig_user_id, fix.orig_name)}`;
+  if (fix.orig_caption) caption += `\n${esc(fix.orig_caption.slice(0, 300))}`;
+  caption += `\n\n✅ <b>Исправил(а): ${mention(msg.from.id, fixer)}</b>`;
+  if (msg.caption) caption += `\n${esc(msg.caption.slice(0, 300))}`;
+  caption += `\n\n${thanks}`;
 
-  // Оригинал и исправление — одним альбомом, рядом друг с другом
   const params = {
-    chat_id: msg.chat.id,
+    chat_id: chatId,
     media: [
-      { type: "photo", media: fix.orig_file_id, caption: origCaption.slice(0, CAPTION_LIMIT), parse_mode: "HTML" },
-      { type: "photo", media: msg.photo.at(-1).file_id, caption: fixCaption.slice(0, CAPTION_LIMIT), parse_mode: "HTML" },
+      { type: "photo", media: fix.orig_file_id, caption: caption.slice(0, CAPTION_LIMIT), parse_mode: "HTML" },
+      { type: "photo", media: msg.photo.at(-1).file_id },
     ],
-    reply_parameters: { message_id: fix.orig_message_id, allow_sending_without_reply: true },
   };
   if (fix.thread_id) params.message_thread_id = fix.thread_id;
-  await ctx.tg.safe("sendMediaGroup", params);
 
-  if (fix.button_message_id) {
-    await ctx.tg.edit(
-      msg.chat.id, fix.button_message_id,
-      `${openText(fix)}\n\n✅ Исправлено: ${mention(msg.from.id, fixer)}`,
-    );
+  if (await ctx.tg.safe("sendMediaGroup", params)) {
+    // Альбом опубликован — убираем из чата исходные фото и служебные сообщения бота,
+    // чтобы фотографии не дублировались
+    for (const id of [fix.orig_message_id, msg.message_id, fix.button_message_id, fix.prompt_message_id]) {
+      if (id) await ctx.tg.del(chatId, id);
+    }
+    return;
   }
-  if (fix.prompt_message_id) await ctx.tg.del(msg.chat.id, fix.prompt_message_id);
-  await ctx.tg.reply(msg, `🙏 Спасибо за исправление, ${mention(msg.from.id, fixer)}!`);
+
+  // Альбом отправить не удалось — оставляем фото в чате и просто отмечаем исправление
+  if (fix.button_message_id) {
+    await ctx.tg.edit(chatId, fix.button_message_id,
+      `${openText(fix)}\n\n✅ Исправлено: <b>${mention(msg.from.id, fixer)}</b>`);
+  }
+  if (fix.prompt_message_id) await ctx.tg.del(chatId, fix.prompt_message_id);
+  await ctx.tg.reply(msg, thanks);
 }
 
 // Если взявшийся не прислал фото вовремя — возвращаем кнопку всем

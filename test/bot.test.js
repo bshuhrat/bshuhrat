@@ -200,17 +200,21 @@ test("фото-исправления", async () => {
   const promptMsg = { message_id: (await DB.prepare("SELECT prompt_message_id AS id FROM photo_fixes WHERE id = 1").first()).id,
     date: 0, chat: G, text: "prompt" };
   cs = await during(() => photo(VALI, "исправил цену", { reply: promptMsg }));
-  assert.ok(cs.some((c) => c.method === "deleteMessage" && c.params.message_id === promptMsg.message_id),
-    "подсказка удаляется после исправления");
   const album = one(cs, "sendMediaGroup");
   assert.equal(album.params.media.length, 2);
   assert.equal(album.params.media[0].media, fix.orig_file_id);
-  assert.match(album.params.media[0].caption, /Оригинал — Ali\nТут ошибка в цене/);
-  assert.match(album.params.media[1].caption, /Исправление — Vali\nисправил цену/);
-  assert.equal(album.params.reply_parameters.message_id, fix.orig_message_id);
-  assert.ok(texts(cs).some((t) => /Спасибо за исправление/.test(t)));
-  assert.equal(cs.filter((c) => c.params.reply_markup?.inline_keyboard?.length).length, 0,
-    "у исправления нет своей кнопки");
+  const caption = album.params.media[0].caption;
+  assert.match(caption, /Нарушение<\/b> — <a href="tg:\/\/user\?id=1">Ali<\/a>\nТут ошибка в цене/);
+  assert.match(caption, /<b>Исправил\(а\): <a href="tg:\/\/user\?id=2">Vali<\/a><\/b>\nисправил цену/);
+  assert.match(caption, /Спасибо за исправление/);
+  assert.equal(album.params.media[1].caption, undefined, "одна подпись на весь альбом");
+  assert.equal(album.params.message_thread_id, 7);
+  const deleted = cs.filter((c) => c.method === "deleteMessage").map((c) => c.params.message_id);
+  const fixMsgId = (await DB.prepare("SELECT fix_message_id FROM photo_fixes WHERE id = 1").first()).fix_message_id;
+  for (const id of [fix.orig_message_id, fixMsgId, fix.button_message_id, promptMsg.message_id]) {
+    assert.ok(deleted.includes(id), `удалено сообщение ${id}`);
+  }
+  assert.equal(cs.filter((c) => c.method === "sendMessage").length, 0, "без лишних сообщений");
 
   // Взялся, но не прислал — кнопка возвращается по таймауту
   await photo(ALI, "ещё одно");
