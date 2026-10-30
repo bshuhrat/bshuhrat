@@ -42,7 +42,7 @@ globalThis.fetch = async (url, init) => {
     result = tgState.queue.filter((u) => u.update_id >= (params.offset || 0));
   } else if (method === "getFile") result = { file_path: `photos/${params.file_id}.jpg` };
   else if (method === "getMe") result = { id: 1, is_bot: true, username: "test_bot" };
-  else if (["sendMessage", "sendDocument"].includes(method)) {
+  else if (["sendMessage", "sendDocument", "sendPhoto"].includes(method)) {
     result = { message_id: nextId++, chat: { id: params.chat_id }, date: 0 };
   } else if (method === "copyMessage") result = { message_id: nextId++ };
   else if (method === "sendMediaGroup") result = [{ message_id: nextId++ }, { message_id: nextId++ }];
@@ -216,7 +216,9 @@ test("фото-исправления", async () => {
   for (const id of [fix.orig_message_id, fixMsgId, fix.button_message_id, promptMsg.message_id]) {
     assert.ok(deleted.includes(id), `удалено сообщение ${id}`);
   }
-  assert.equal(cs.filter((c) => c.method === "sendMessage").length, 0, "без лишних сообщений");
+  const extra = cs.filter((c) => c.method === "sendMessage");
+  assert.equal(extra.length, 1, "только строка с кнопкой для админов");
+  assert.equal(extra[0].params.reply_markup.inline_keyboard[0][0].callback_data, "ret:1");
 
   // Взялся, но не прислал — кнопка возвращается по таймауту
   await photo(ALI, "ещё одно");
@@ -391,4 +393,55 @@ test("на фото рисуются полосы НАРУШЕНИЕ / ИСПР�
   const plain = one(cs2, "sendMediaGroup");
   assert.equal(plain.params.media[0].media, fix2.orig_file_id);
   delete env.IMAGES;
+});
+
+test("админ возвращает исправленное фото в работу", async () => {
+  await photo(ALI, "мусор у входа");
+  const fix = await DB.prepare("SELECT * FROM photo_fixes ORDER BY id DESC LIMIT 1").first();
+  await press(VALI, `fix:${fix.id}`, { message_id: fix.button_message_id, date: 0, chat: G, text: "x" });
+  await photo(VALI, "убрал");
+  const done = await DB.prepare("SELECT * FROM photo_fixes WHERE id = ?").bind(fix.id).first();
+  assert.equal(done.status, "done");
+  const albumIds = JSON.parse(done.result_message_ids);
+  assert.equal(albumIds.length, 2);
+  const control = { message_id: done.control_message_id, date: 0, chat: G, text: "x" };
+
+  // обычный участник вернуть не может
+  let cs = await during(() => press(SAMI, `ret:${fix.id}`, control));
+  assert.match(one(cs, "answerCallbackQuery").params.text, /только администратор/);
+
+  cs = await during(() => press(ADM, `ret:${fix.id}`, control));
+  const deleted = cs.filter((c) => c.method === "deleteMessage").map((c) => c.params.message_id);
+  for (const id of [...albumIds, done.control_message_id]) assert.ok(deleted.includes(id), `удалено ${id}`);
+  const again = one(cs, "sendPhoto");
+  assert.equal(again.params.photo, fix.orig_file_id, "исходное фото без отметок");
+  assert.match(again.params.caption, /Возвращено в работу[\s\S]*Vali/);
+  assert.equal(again.params.reply_markup.inline_keyboard[0][0].callback_data, `fix:${fix.id}`);
+  assert.equal(again.params.message_thread_id, 7);
+  const reopened = await DB.prepare("SELECT * FROM photo_fixes WHERE id = ?").bind(fix.id).first();
+  assert.equal(reopened.status, "open");
+  assert.equal(reopened.button_message_id, reopened.orig_message_id);
+
+  cs = await during(() => press(ADM, `ret:${fix.id}`, control));
+  assert.match(one(cs, "answerCallbackQuery").params.text, /уже возвращено/);
+
+  // повторное исправление: кнопка на самом фото — меняется подпись, а не текст
+  const photoMsg = { message_id: reopened.orig_message_id, date: 0, chat: G, photo: [{ file_id: "x" }] };
+  cs = await during(() => press(SAMI, `fix:${fix.id}`, photoMsg));
+  const cap = one(cs, "editMessageCaption");
+  assert.match(cap.params.caption, /Исправление отправляет/);
+  cs = await during(() => photo(SAMI, "теперь чисто"));
+  assert.ok(one(cs, "sendMediaGroup"));
+  assert.ok(cs.some((c) => c.method === "deleteMessage" && c.params.message_id === reopened.orig_message_id));
+});
+
+test("PHOTO_TOPIC: фото-исправления только в теме по ссылке", async () => {
+  env.PHOTO_TOPIC = "https://t.me/c/1/87";
+  // тема 7 включена командой, но в настройках задана другая — фото там не трогаем
+  let cs = await during(() => photo(ALI, "в старой теме"));
+  assert.equal(cs.length, 0);
+  cs = await during(() => photo(ALI, "в нужной теме", { thread: 87, chat: G }));
+  // G.id = -1001 соответствует ссылке t.me/c/1
+  assert.ok(cs.some((c) => c.params.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data?.startsWith("fix:")));
+  delete env.PHOTO_TOPIC;
 });

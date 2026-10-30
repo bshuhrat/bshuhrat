@@ -91,6 +91,12 @@ export function containsKeyword(text, keyword) {
   return new RegExp(`(^|[^\\p{L}\\p{N}_])${k}($|[^\\p{L}\\p{N}_])`, "iu").test(text);
 }
 
+// Ссылка на тему «https://t.me/c/3716710626/87» -> { chatId: -1003716710626, threadId: 87 }
+export function parseTopicLink(link) {
+  const m = String(link || "").match(/t\.me\/c\/(\d+)\/(\d+)/);
+  return m ? { chatId: Number(`-100${m[1]}`), threadId: Number(m[2]) } : null;
+}
+
 // "/task@my_bot аргументы" -> { cmd: "task", args: "аргументы" }
 export function parseCommand(msg, botUsername) {
   const text = msg.text || "";

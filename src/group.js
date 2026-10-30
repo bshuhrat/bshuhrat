@@ -1,5 +1,5 @@
 // Обработчики в групповом чате: темы, автоответы, задания, сдачи, запросы, фото.
-import { handlePhoto, onFixButton } from "./photofix.js";
+import { handlePhoto, onFixButton, onReturnButton } from "./photofix.js";
 import { acceptSubmission, closeTask, publishTask, registerRequest } from "./services.js";
 import { taskSummary } from "./stats.js";
 import {
@@ -197,6 +197,12 @@ async function handleCommand(ctx, msg, { cmd, args }) {
       return;
 
     case "photo_topic": {
+      if (cfg.photoTopic) {
+        const { chatId: c, threadId: t } = cfg.photoTopic;
+        await tg.reply(msg, "Тема фото-исправлений задана в настройках бота (PHOTO_TOPIC): " +
+          `https://t.me/c/${String(c).replace(/^-100/, "")}/${t}`);
+        return;
+      }
       const enabled = !["off", "выкл", "0"].includes(args.toLowerCase());
       await db.setPhotoMode(chatId, threadId, enabled);
       await tg.reply(msg, enabled
@@ -284,6 +290,8 @@ export async function handleGroupCallback(ctx, call) {
   const [kind, id] = call.data.split(":");
   if (kind === "fix") {
     await onFixButton(ctx, call);
+  } else if (kind === "ret") {
+    await onReturnButton(ctx, call);
   } else if (kind === "how") {
     await ctx.tg.answer(call.id,
       "Нажмите «Ответить» (reply) на сообщение с заданием и пришлите текст, фото или файл. " +

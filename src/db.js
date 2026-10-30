@@ -37,7 +37,8 @@ const SCHEMA = [
     orig_user_id INTEGER NOT NULL, orig_name TEXT NOT NULL, button_message_id INTEGER,
     status TEXT NOT NULL DEFAULT 'open', -- open | claimed | done
     fixer_id INTEGER, fixer_name TEXT, claimed_at TEXT, fix_message_id INTEGER, done_at TEXT,
-    created_at TEXT, reminded INTEGER NOT NULL DEFAULT 0, prompt_message_id INTEGER)`,
+    created_at TEXT, reminded INTEGER NOT NULL DEFAULT 0, prompt_message_id INTEGER,
+    result_message_ids TEXT, control_message_id INTEGER)`,
   // Состояние диалога с админом (ждём комментарий / ответ)
   `CREATE TABLE IF NOT EXISTS states (
     user_id INTEGER PRIMARY KEY, state TEXT NOT NULL, data TEXT)`,
@@ -49,6 +50,8 @@ const MIGRATIONS = [
   "ALTER TABLE photo_fixes ADD COLUMN created_at TEXT",
   "ALTER TABLE photo_fixes ADD COLUMN reminded INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE photo_fixes ADD COLUMN prompt_message_id INTEGER",
+  "ALTER TABLE photo_fixes ADD COLUMN result_message_ids TEXT",
+  "ALTER TABLE photo_fixes ADD COLUMN control_message_id INTEGER",
 ];
 
 let schemaReady = false;
@@ -376,6 +379,33 @@ export class Database {
       `UPDATE photo_fixes SET status = 'open', fixer_id = NULL, fixer_name = NULL, claimed_at = NULL,
        prompt_message_id = NULL WHERE id = ? AND status = 'claimed'`,
       fixId,
+    );
+  }
+
+  // Итоговый альбом и сообщение с кнопкой «Вернуть в работу»
+  setFixResult(fixId, messageIds, controlMessageId) {
+    return this.run(
+      "UPDATE photo_fixes SET result_message_ids = ?, control_message_id = ? WHERE id = ?",
+      JSON.stringify(messageIds), controlMessageId, fixId,
+    );
+  }
+
+  // Админ вернул исправленное фото в работу. false — уже возвращено
+  async reopenPhotoFix(fixId) {
+    const r = await this.run(
+      `UPDATE photo_fixes SET status = 'open', fixer_id = NULL, fixer_name = NULL, claimed_at = NULL,
+       fix_message_id = NULL, done_at = NULL, prompt_message_id = NULL, reminded = 0, created_at = ?,
+       result_message_ids = NULL, control_message_id = NULL WHERE id = ? AND status = 'done'`,
+      nowIso(), fixId,
+    );
+    return r.changes > 0;
+  }
+
+  // Фото заново опубликовано ботом — кнопка теперь прямо на нём
+  setFixPhotoMessage(fixId, messageId) {
+    return this.run(
+      "UPDATE photo_fixes SET orig_message_id = ?, button_message_id = ? WHERE id = ?",
+      messageId, messageId, fixId,
     );
   }
 

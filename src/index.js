@@ -4,6 +4,7 @@ import { Database } from "./db.js";
 import { handleGroupCallback, handleGroupMessage } from "./group.js";
 import { runScheduled } from "./scheduler.js";
 import { Telegram } from "./telegram.js";
+import { parseTopicLink } from "./utils.js";
 
 let botUsername = null;
 
@@ -29,6 +30,7 @@ function loadConfig(env) {
     dailyReportTime: hhmm(env.DAILY_REPORT_TIME || "20:00"),
     remindBeforeHours: Number(env.REMIND_BEFORE_HOURS || 24),
     photoFixTimeoutMin: Number(env.PHOTO_FIX_TIMEOUT_MIN || 60),
+    photoTopic: parseTopicLink(env.PHOTO_TOPIC),
     photoRemindHours: Number(env.PHOTO_REMIND_HOURS || 7),
     photoRemindFrom: hhmm(env.PHOTO_REMIND_FROM || "09:00"),
     photoRemindTo: hhmm(env.PHOTO_REMIND_TO || "23:59"),

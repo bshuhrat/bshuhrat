@@ -62,6 +62,13 @@ export class Telegram {
     return this.safe("editMessageText", params);
   }
 
+  editCaption(chatId, messageId, caption, markup = null) {
+    return this.safe("editMessageCaption", {
+      chat_id: chatId, message_id: messageId, caption, parse_mode: "HTML",
+      reply_markup: markup || { inline_keyboard: [] },
+    });
+  }
+
   answer(callbackId, text = "", alert = false) {
     return this.safe("answerCallbackQuery", { callback_query_id: callbackId, text, show_alert: alert });
   }

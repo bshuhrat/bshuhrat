@@ -1,6 +1,6 @@
 // Тема фото-исправлений: под каждым фото — кнопка «Отправить фото исправление».
 import { FIXED_PNG, VIOLATION_PNG } from "./banners.js";
-import { photoFixKeyboard } from "./keyboards.js";
+import { photoFixKeyboard, returnKeyboard } from "./keyboards.js";
 import { esc, fullName, localParts, mention, threadOf } from "./utils.js";
 
 const CAPTION_LIMIT = 1024;
@@ -12,23 +12,47 @@ const CALL_TO_ACTION = "\n👇 Есть ошибка? Нажмите кнопк�
 
 const isoMinus = (ms) => new Date(Date.now() - ms).toISOString().slice(0, 19) + "Z";
 
-// Кнопка под фото. Если Telegram не принял цветную кнопку — отправляем обычную
+// Та же клавиатура без цвета — для старых версий Telegram, не принимающих style
+function plainKeyboard(markup) {
+  return {
+    inline_keyboard: markup.inline_keyboard.map((row) =>
+      row.map(({ text, callback_data }) => ({ text, callback_data }))),
+  };
+}
+
+// Отправка с цветной кнопкой; если Telegram её не принял — с обычной
+async function withButtonFallback(send, markup) {
+  return (await send(markup)) || send(plainKeyboard(markup));
+}
+
+// Кнопка под фото
 async function sendFixButton(ctx, chatId, threadId, replyTo, text, fixId) {
-  const opts = { thread: threadId, replyTo, markup: photoFixKeyboard(fixId) };
-  let sent = await ctx.tg.send(chatId, text, opts);
-  if (!sent) {
-    const plain = photoFixKeyboard(fixId);
-    plain.inline_keyboard[0][0] = { text: plain.inline_keyboard[0][0].text, callback_data: `fix:${fixId}` };
-    sent = await ctx.tg.send(chatId, text, { ...opts, markup: plain });
-  }
+  const sent = await withButtonFallback(
+    (markup) => ctx.tg.send(chatId, text, { thread: threadId, replyTo, markup }),
+    photoFixKeyboard(fixId));
   if (sent) await ctx.db.setFixButton(fixId, sent.message_id);
   return sent;
+}
+
+// После «Вернуть в работу» кнопка стоит прямо на фото — тогда меняем подпись, а не текст
+function editFixMessage(ctx, fix, text, markup = null) {
+  if (fix.button_message_id === fix.orig_message_id) {
+    return ctx.tg.editCaption(fix.chat_id, fix.button_message_id, text, markup);
+  }
+  return ctx.tg.edit(fix.chat_id, fix.button_message_id, text, markup);
+}
+
+// Тема фото-исправлений: из переменной PHOTO_TOPIC (ссылка на тему) или включённая /photo_topic
+export async function isPhotoTopic(ctx, chatId, threadId) {
+  const topic = ctx.cfg.photoTopic;
+  if (topic) return topic.chatId === chatId && topic.threadId === threadId;
+  return ctx.db.isPhotoTopic(chatId, threadId);
 }
 
 // Обрабатывает фото в теме исправлений. true — сообщение обработано
 export async function handlePhoto(ctx, msg) {
   const threadId = threadOf(msg);
-  if (!msg.photo || !(await ctx.db.isPhotoTopic(msg.chat.id, threadId))) return false;
+  if (!msg.photo || !(await isPhotoTopic(ctx, msg.chat.id, threadId))) return false;
   const user = msg.from;
 
   // Фото от участника, который взялся за исправление, — это и есть исправление
@@ -67,7 +91,7 @@ export async function onFixButton(ctx, call) {
 
   // Убираем кнопку, чтобы никто другой не взялся за это фото
   const chatId = call.message.chat.id;
-  await ctx.tg.edit(chatId, call.message.message_id,
+  await editFixMessage(ctx, { ...fix, button_message_id: call.message.message_id },
     `${openText(fix)}\n\n🛠 Исправление отправляет ${mention(call.from.id, name)}.`);
 
   // Сообщение с «принудительным ответом»: у нажавшего сразу открывается ответ
@@ -150,16 +174,22 @@ async function finishFix(ctx, msg, fix) {
   if (album) {
     // Альбом опубликован — убираем из чата исходные фото и служебные сообщения бота,
     // чтобы фотографии не дублировались
-    for (const id of [fix.orig_message_id, msg.message_id, fix.button_message_id, fix.prompt_message_id]) {
-      if (id) await ctx.tg.del(chatId, id);
-    }
+    const ids = [fix.orig_message_id, msg.message_id, fix.button_message_id, fix.prompt_message_id];
+    for (const id of new Set(ids.filter(Boolean))) await ctx.tg.del(chatId, id);
+
+    // Под альбом кнопку поставить нельзя — отдельная строка для админов
+    const control = await withButtonFallback(
+      (markup) => ctx.tg.send(chatId, "👮 Админ не согласен с исправлением?", {
+        thread: fix.thread_id, markup,
+      }),
+      returnKeyboard(fix.id));
+    await ctx.db.setFixResult(fix.id, album.map((m) => m.message_id), control?.message_id ?? null);
     return;
   }
 
   // Альбом отправить не удалось — оставляем фото в чате и просто отмечаем исправление
   if (fix.button_message_id) {
-    await ctx.tg.edit(chatId, fix.button_message_id,
-      `${openText(fix)}\n\n✅ Исправлено: <b>${mention(msg.from.id, fixer)}</b>`);
+    await editFixMessage(ctx, fix, `${openText(fix)}\n\n✅ Исправлено: <b>${mention(msg.from.id, fixer)}</b>`);
   }
   if (fix.prompt_message_id) await ctx.tg.del(chatId, fix.prompt_message_id);
   await ctx.tg.reply(msg, thanks);
@@ -171,11 +201,9 @@ export async function releaseExpired(ctx) {
     await ctx.db.releasePhotoFix(fix.id);
     if (fix.prompt_message_id) await ctx.tg.del(fix.chat_id, fix.prompt_message_id);
     if (!fix.button_message_id) continue;
-    await ctx.tg.edit(
-      fix.chat_id, fix.button_message_id,
+    await withButtonFallback((markup) => editFixMessage(ctx, fix,
       `${openText(fix)}\n\n⌛ ${esc(fix.fixer_name)} не прислал(а) исправление — кнопка снова доступна.`,
-      photoFixKeyboard(fix.id),
-    );
+      markup), photoFixKeyboard(fix.id));
   }
 }
 
@@ -188,12 +216,52 @@ export async function remindUnfixed(ctx) {
   for (const fix of await ctx.db.unfixedPhotos(isoMinus(photoRemindHours * 3_600_000), REMIND_BATCH)) {
     await ctx.db.markFixReminded(fix.id);
     // Старую кнопку убираем, новую ставим под напоминанием — чтобы была на виду
-    if (fix.button_message_id && !(await ctx.tg.del(fix.chat_id, fix.button_message_id))) {
-      await ctx.tg.edit(fix.chat_id, fix.button_message_id, openText(fix));
+    if (fix.button_message_id === fix.orig_message_id) {
+      await editFixMessage(ctx, fix, openText(fix)); // само фото не удаляем — только кнопку
+    } else if (fix.button_message_id && !(await ctx.tg.del(fix.chat_id, fix.button_message_id))) {
+      await editFixMessage(ctx, fix, openText(fix));
     }
     await sendFixButton(ctx, fix.chat_id, fix.thread_id, fix.orig_message_id,
       `⏰ <b>Нужно исправить!</b>\n${openText(fix)} ждёт исправления уже больше ` +
         `${photoRemindHours} ч.${CALL_TO_ACTION}`,
       fix.id);
   }
+}
+
+// Админ может вернуть фото в работу, если не согласен с исправлением
+async function isChatAdmin(ctx, chatId, userId) {
+  if (ctx.cfg.adminIds.has(userId)) return true;
+  const member = await ctx.tg.safe("getChatMember", { chat_id: chatId, user_id: userId });
+  return Boolean(member && ["creator", "administrator"].includes(member.status));
+}
+
+export async function onReturnButton(ctx, call) {
+  const fixId = Number(call.data.split(":")[1]);
+  const chatId = call.message.chat.id;
+  if (!(await isChatAdmin(ctx, chatId, call.from.id))) {
+    await ctx.tg.answer(call.id, "Вернуть в работу может только администратор.", true);
+    return;
+  }
+  const fix = await ctx.db.getPhotoFix(fixId);
+  if (!fix || !(await ctx.db.reopenPhotoFix(fixId))) {
+    await ctx.tg.answer(call.id, "Это фото уже возвращено в работу.", true);
+    return;
+  }
+  await ctx.tg.answer(call.id, "↩️ Фото возвращено в работу.");
+
+  // Убираем альбом с исправлением и строку с кнопкой
+  const ids = [...JSON.parse(fix.result_message_ids || "[]"), fix.control_message_id, call.message.message_id];
+  for (const id of new Set(ids.filter(Boolean))) await ctx.tg.del(chatId, id);
+
+  // Публикуем исходное фото-нарушение заново — с красной кнопкой прямо на нём
+  let caption = openText(fix);
+  if (fix.orig_caption) caption += `\n${esc(fix.orig_caption.slice(0, 300))}`;
+  caption += `\n\n↩️ <b>Возвращено в работу</b> администратором ${mention(call.from.id, fullName(call.from))}: ` +
+    `исправление от ${mention(fix.fixer_id, fix.fixer_name)} не принято.${CALL_TO_ACTION}`;
+  const params = { chat_id: chatId, photo: fix.orig_file_id, caption: caption.slice(0, CAPTION_LIMIT), parse_mode: "HTML" };
+  if (fix.thread_id) params.message_thread_id = fix.thread_id;
+  const sent = await withButtonFallback(
+    (reply_markup) => ctx.tg.safe("sendPhoto", { ...params, reply_markup }),
+    photoFixKeyboard(fixId));
+  if (sent) await ctx.db.setFixPhotoMessage(fixId, sent.message_id);
 }
