@@ -1,0 +1,17 @@
+name = "telegram-tasks-bot"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+# Не затирать переменные, заданные в панели Cloudflare, при каждом деплое
+keep_vars = true
+
+# База данных D1 — создаётся автоматически при первом деплое
+[[d1_databases]]
+binding = "DB"
+database_name = "telegram-tasks-bot"
+
+# Планировщик: каждую минуту проверяет дедлайны, отчёт и фото-исправления
+[triggers]
+crons = ["* * * * *"]
+
+[observability]
+enabled = true
