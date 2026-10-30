@@ -392,6 +392,15 @@ export class Database {
     );
   }
 
+  // Исправленное фото, к альбому которого относится сообщение
+  findFixByResultMessage(chatId, messageId) {
+    return this.one(
+      `SELECT * FROM photo_fixes WHERE chat_id = ? AND status = 'done' AND result_message_ids IS NOT NULL
+       AND EXISTS (SELECT 1 FROM json_each(result_message_ids) WHERE value = ?)`,
+      chatId, messageId,
+    );
+  }
+
   // Админ вернул исправленное фото в работу. false — уже возвращено
   async reopenPhotoFix(fixId) {
     const r = await this.run(

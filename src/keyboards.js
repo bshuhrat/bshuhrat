@@ -23,7 +23,3 @@ export const photoFixKeyboard = (fixId) => ({
   // style: "danger" — яркая красная кнопка (Bot API 9.4+); старые клиенты покажут обычную
   inline_keyboard: [[{ ...btn("📸 Отправить фото исправление", `fix:${fixId}`), style: "danger" }]],
 });
-
-export const returnKeyboard = (fixId) => ({
-  inline_keyboard: [[{ ...btn("↩️ Вернуть в работу", `ret:${fixId}`), style: "primary" }]],
-});

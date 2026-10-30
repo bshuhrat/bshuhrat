@@ -1,6 +1,6 @@
 // Тема фото-исправлений: под каждым фото — кнопка «Отправить фото исправление».
 import { FIXED_PNG, VIOLATION_PNG } from "./banners.js";
-import { photoFixKeyboard, returnKeyboard } from "./keyboards.js";
+import { photoFixKeyboard } from "./keyboards.js";
 import { esc, fullName, localParts, mention, threadOf } from "./utils.js";
 
 const CAPTION_LIMIT = 1024;
@@ -177,10 +177,8 @@ async function finishFix(ctx, msg, fix) {
     const ids = [fix.orig_message_id, msg.message_id, fix.button_message_id, fix.prompt_message_id];
     for (const id of new Set(ids.filter(Boolean))) await ctx.tg.del(chatId, id);
 
-    // Кнопку «Вернуть в работу» видят только администраторы — она приходит им в личку
-    const albumIds = album.map((m) => m.message_id);
-    const adminMessages = await notifyAdminsOfFix(ctx, fix, msg.from, albumIds[0]);
-    await ctx.db.setFixResult(fix.id, albumIds, adminMessages);
+    // Админ может вернуть фото в работу, ответив на альбом словом «вернуть»
+    await ctx.db.setFixResult(fix.id, album.map((m) => m.message_id), []);
     return;
   }
 
@@ -225,38 +223,6 @@ export async function remindUnfixed(ctx) {
   }
 }
 
-// Ссылка на сообщение в теме супергруппы
-function messageLink(chatId, threadId, messageId) {
-  const chat = String(chatId).replace(/^-100/, "");
-  return `https://t.me/c/${chat}/${threadId ? `${threadId}/` : ""}${messageId}`;
-}
-
-// Все, кто может вернуть фото в работу: ADMIN_IDS и администраторы группы (без ботов)
-async function adminRecipients(ctx, chatId) {
-  const ids = new Set(ctx.cfg.adminIds);
-  const admins = await ctx.tg.safe("getChatAdministrators", { chat_id: chatId });
-  for (const a of admins || []) if (!a.user.is_bot) ids.add(a.user.id);
-  return [...ids];
-}
-
-// Сообщает администраторам в личку об исправлении — с кнопкой «Вернуть в работу».
-// Дойдёт до тех, кто хотя бы раз нажал /start у бота.
-async function notifyAdminsOfFix(ctx, fix, fixer, albumMessageId) {
-  const text =
-    `✅ <b>Фото исправлено</b>\n` +
-    `Нарушение — ${mention(fix.orig_user_id, fix.orig_name)}\n` +
-    `Исправил(а) — ${mention(fixer.id, fullName(fixer))}\n` +
-    `<a href="${messageLink(fix.chat_id, fix.thread_id, albumMessageId)}">Посмотреть в теме</a>\n\n` +
-    "Не согласны с исправлением? Верните фото в работу:";
-  const sent = [];
-  for (const adminId of await adminRecipients(ctx, fix.chat_id)) {
-    const msg = await withButtonFallback(
-      (markup) => ctx.tg.send(adminId, text, { markup }), returnKeyboard(fix.id));
-    if (msg) sent.push([adminId, msg.message_id]);
-  }
-  return sent;
-}
-
 // Админ может вернуть фото в работу, если не согласен с исправлением
 async function isChatAdmin(ctx, chatId, userId) {
   if (ctx.cfg.adminIds.has(userId)) return true;
@@ -264,50 +230,63 @@ async function isChatAdmin(ctx, chatId, userId) {
   return Boolean(member && ["creator", "administrator"].includes(member.status));
 }
 
-export async function onReturnButton(ctx, call) {
-  const fixId = Number(call.data.split(":")[1]);
-  const fix = await ctx.db.getPhotoFix(fixId);
-  if (!fix) {
-    await ctx.tg.answer(call.id, "Фото не найдено.", true);
-    return;
-  }
+// Возвращает исправленное фото в работу: убирает альбом и заново публикует фото-нарушение
+async function returnFix(ctx, fix, admin, reason = "") {
+  if (!(await ctx.db.reopenPhotoFix(fix.id))) return false;
   const chatId = fix.chat_id;
-  if (!(await isChatAdmin(ctx, chatId, call.from.id))) {
-    await ctx.tg.answer(call.id, "Вернуть в работу может только администратор.", true);
-    return;
-  }
-  if (!(await ctx.db.reopenPhotoFix(fixId))) {
-    await ctx.tg.answer(call.id, "Это фото уже возвращено в работу.", true);
-    return;
-  }
-  await ctx.tg.answer(call.id, "↩️ Фото возвращено в работу.");
 
   // Убираем альбом с исправлением (и строку с кнопкой из прошлой версии бота, если была)
   const ids = [...JSON.parse(fix.result_message_ids || "[]"), fix.control_message_id];
   for (const id of new Set(ids.filter(Boolean))) await ctx.tg.del(chatId, id);
 
-  // У всех админов в личке кнопку заменяем отметкой, кто вернул
-  const who = mention(call.from.id, fullName(call.from));
-  const adminMessages = JSON.parse(fix.admin_messages || "[]");
-  if (call.message.chat.type === "private") adminMessages.push([call.message.chat.id, call.message.message_id]);
-  const seen = new Set();
-  for (const [adminChat, messageId] of adminMessages) {
-    if (seen.has(`${adminChat}:${messageId}`)) continue;
-    seen.add(`${adminChat}:${messageId}`);
-    await ctx.tg.edit(adminChat, messageId,
-      `↩️ Фото от ${mention(fix.orig_user_id, fix.orig_name)} возвращено в работу (${who}).\n` +
-      `Исправление от ${mention(fix.fixer_id, fix.fixer_name)} не принято.`);
+  const who = mention(admin.id, fullName(admin));
+  // Кнопки в личке админам из прошлой версии бота — заменяем отметкой
+  for (const [adminChat, messageId] of JSON.parse(fix.admin_messages || "[]")) {
+    await ctx.tg.edit(adminChat, messageId, `↩️ Фото от ${mention(fix.orig_user_id, fix.orig_name)} ` +
+      `возвращено в работу (${who}).`);
   }
 
   // Публикуем исходное фото-нарушение заново — с красной кнопкой прямо на нём
   let caption = openText(fix);
   if (fix.orig_caption) caption += `\n${esc(fix.orig_caption.slice(0, 300))}`;
-  caption += `\n\n↩️ <b>Возвращено в работу</b> администратором ${mention(call.from.id, fullName(call.from))}: ` +
-    `исправление от ${mention(fix.fixer_id, fix.fixer_name)} не принято.${CALL_TO_ACTION}`;
+  caption += `\n\n↩️ <b>Возвращено в работу</b> администратором ${who}: ` +
+    `исправление от ${mention(fix.fixer_id, fix.fixer_name)} не принято.`;
+  if (reason) caption += `\nПричина: ${esc(reason.slice(0, 300))}`;
+  caption += CALL_TO_ACTION;
   const params = { chat_id: chatId, photo: fix.orig_file_id, caption: caption.slice(0, CAPTION_LIMIT), parse_mode: "HTML" };
   if (fix.thread_id) params.message_thread_id = fix.thread_id;
   const sent = await withButtonFallback(
     (reply_markup) => ctx.tg.safe("sendPhoto", { ...params, reply_markup }),
-    photoFixKeyboard(fixId));
-  if (sent) await ctx.db.setFixPhotoMessage(fixId, sent.message_id);
+    photoFixKeyboard(fix.id));
+  if (sent) await ctx.db.setFixPhotoMessage(fix.id, sent.message_id);
+  return true;
+}
+
+// «вернуть», «вернуть плохо видно», «/vernut» — в ответ на альбом с исправлением
+const RETURN_RE = /^\s*(?:\/(?:vernut|return)(?:@\w+)?|вернуть|↩️)(?:[\s:,.-]+([\s\S]*))?$/iu;
+
+// Админ ответил на альбом словом «вернуть». true — сообщение обработано
+export async function handleAdminReturn(ctx, msg) {
+  const m = (msg.text || "").match(RETURN_RE);
+  if (!m || !msg.reply_to_message) return false;
+  const fix = await ctx.db.findFixByResultMessage(msg.chat.id, msg.reply_to_message.message_id);
+  if (!fix || !(await isChatAdmin(ctx, msg.chat.id, msg.from.id))) return false;
+  await ctx.tg.del(msg.chat.id, msg.message_id); // команду админа никто не увидит
+  await returnFix(ctx, fix, msg.from, (m[1] || "").trim());
+  return true;
+}
+
+// Кнопка «Вернуть в работу» из прошлой версии бота
+export async function onReturnButton(ctx, call) {
+  const fix = await ctx.db.getPhotoFix(Number(call.data.split(":")[1]));
+  if (!fix) {
+    await ctx.tg.answer(call.id, "Фото не найдено.", true);
+    return;
+  }
+  if (!(await isChatAdmin(ctx, fix.chat_id, call.from.id))) {
+    await ctx.tg.answer(call.id, "Вернуть в работу может только администратор.", true);
+    return;
+  }
+  await ctx.tg.answer(call.id, (await returnFix(ctx, fix, call.from))
+    ? "↩️ Фото возвращено в работу." : "Это фото уже возвращено в работу.", true);
 }

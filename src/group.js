@@ -1,5 +1,5 @@
 // Обработчики в групповом чате: темы, автоответы, задания, сдачи, запросы, фото.
-import { handlePhoto, onFixButton, onReturnButton } from "./photofix.js";
+import { handleAdminReturn, handlePhoto, onFixButton, onReturnButton } from "./photofix.js";
 import { acceptSubmission, closeTask, publishTask, registerRequest } from "./services.js";
 import { taskSummary } from "./stats.js";
 import {
@@ -29,6 +29,7 @@ const HELP_ADMIN = `
 /task <i>название | описание | дедлайн</i> — новое задание в этой теме
    дедлайн: <code>25.10.2026 18:00</code> или <code>25.10</code>
 /photo_topic — сделать текущую тему темой фото-исправлений (<code>/photo_topic off</code> — выключить)
+Не согласны с фото-исправлением — ответьте (reply) на альбом словом <code>вернуть</code> (можно с причиной: <code>вернуть плохо видно</code>). Бот удалит ваше сообщение и вернёт фото в работу
 /close <i>id</i> — закрыть задание и получить итог
 /stat <i>id</i> — итог по заданию (придёт в личку)`;
 
@@ -64,6 +65,9 @@ export async function handleGroupMessage(ctx, msg) {
   }
   if (!user || user.is_bot) return;
   await db.touchMember(chatId, user.id, user.username, fullName(user));
+
+  // Админ ответил на альбом с исправлением словом «вернуть»
+  if (await handleAdminReturn(ctx, msg)) return;
 
   const command = parseCommand(msg, cfg.botUsername);
   if (command) {

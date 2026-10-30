@@ -222,13 +222,8 @@ test("фото-исправления", async () => {
   for (const id of [fix.orig_message_id, fixMsgId, fix.button_message_id, promptMsg.message_id]) {
     assert.ok(deleted.includes(id), `удалено сообщение ${id}`);
   }
-  const sent = cs.filter((c) => c.method === "sendMessage");
-  assert.equal(sent.filter((c) => c.params.chat_id === G.id).length, 0, "в теме нет лишних сообщений");
-  assert.deepEqual(sent.map((c) => c.params.chat_id).sort((a, b) => a - b), [50, 100], "кнопка — в личку админам");
-  for (const c of sent) {
-    assert.equal(c.params.reply_markup.inline_keyboard[0][0].callback_data, "ret:1");
-    assert.match(c.params.text, /Нарушение — .*Ali[\s\S]*Исправил\(а\) — .*Vali[\s\S]*t\.me\/c\/1\/7\//);
-  }
+  assert.equal(cs.filter((c) => c.method === "sendMessage").length, 0,
+    "никаких лишних сообщений — ни в теме, ни в личку");
 
   // Взялся, но не прислал — кнопка возвращается по таймауту
   await photo(ALI, "ещё одно");
@@ -405,7 +400,7 @@ test("на фото рисуются полосы НАРУШЕНИЕ / ИСПР�
   delete env.IMAGES;
 });
 
-test("админ возвращает исправленное фото в работу", async () => {
+test("админ возвращает исправленное фото в работу ответом «вернуть»", async () => {
   await photo(ALI, "мусор у входа");
   const fix = await DB.prepare("SELECT * FROM photo_fixes ORDER BY id DESC LIMIT 1").first();
   await press(VALI, `fix:${fix.id}`, { message_id: fix.button_message_id, date: 0, chat: G, text: "x" });
@@ -414,33 +409,35 @@ test("админ возвращает исправленное фото в ра�
   assert.equal(done.status, "done");
   const albumIds = JSON.parse(done.result_message_ids);
   assert.equal(albumIds.length, 2);
-  const adminMsgs = JSON.parse(done.admin_messages);
-  assert.equal(adminMsgs.length, 2);
-  const [gadmChat, gadmMsg] = adminMsgs.find(([chat]) => chat === GADM.id);
-  const control = { message_id: gadmMsg, date: 0, chat: { id: gadmChat, type: "private" }, text: "x" };
+  const album = { message_id: albumIds[1], date: 0, chat: G, photo: [{ file_id: "x" }] };
 
-  // обычный участник вернуть не может
-  let cs = await during(() => press(SAMI, `ret:${fix.id}`, control));
-  assert.match(one(cs, "answerCallbackQuery").params.text, /только администратор/);
+  // видимые действия бота в чате
+  const visible = (cs) => cs.filter((c) => /^(send|delete|edit)/.test(c.method));
+  // обычный участник написал «вернуть» — ничего не происходит
+  let cs = await during(() => msg(SAMI, "вернуть", { thread: 7, reply: album }));
+  assert.equal(visible(cs).length, 0);
+  // «вернуть» не в ответ на альбом — тоже ничего
+  cs = await during(() => msg(ADM, "вернуть", { thread: 7 }));
+  assert.equal(visible(cs).length, 0);
 
-  // админ группы (не из ADMIN_IDS) — может
-  cs = await during(() => press(GADM, `ret:${fix.id}`, control));
+  // админ группы (не из ADMIN_IDS) отвечает на альбом с причиной
+  cs = await during(() => msg(GADM, "Вернуть: плохо видно", { thread: 7, reply: album }));
   const deleted = cs.filter((c) => c.method === "deleteMessage").map((c) => c.params.message_id);
   for (const id of albumIds) assert.ok(deleted.includes(id), `удалено ${id}`);
-  const edits = cs.filter((c) => c.method === "editMessageText");
-  assert.deepEqual(edits.map((c) => c.params.chat_id).sort((a, b) => a - b), [50, 100], "кнопка убрана у всех админов");
-  assert.match(edits[0].params.text, /возвращено в работу[\s\S]*GroupAdmin/);
+  assert.equal(deleted.length, 3, "альбом и сообщение админа «вернуть»");
+  assert.equal(cs.filter((c) => c.method === "sendMessage").length, 0, "без сообщений в личку");
   const again = one(cs, "sendPhoto");
   assert.equal(again.params.photo, fix.orig_file_id, "исходное фото без отметок");
-  assert.match(again.params.caption, /Возвращено в работу[\s\S]*GroupAdmin[\s\S]*Vali/);
+  assert.match(again.params.caption, /Возвращено в работу[\s\S]*GroupAdmin[\s\S]*Vali[\s\S]*Причина: плохо видно/);
   assert.equal(again.params.reply_markup.inline_keyboard[0][0].callback_data, `fix:${fix.id}`);
   assert.equal(again.params.message_thread_id, 7);
   const reopened = await DB.prepare("SELECT * FROM photo_fixes WHERE id = ?").bind(fix.id).first();
   assert.equal(reopened.status, "open");
   assert.equal(reopened.button_message_id, reopened.orig_message_id);
 
-  cs = await during(() => press(ADM, `ret:${fix.id}`, control));
-  assert.match(one(cs, "answerCallbackQuery").params.text, /уже возвращено/);
+  // повторный «вернуть» на удалённый альбом ничего не делает
+  cs = await during(() => msg(ADM, "вернуть", { thread: 7, reply: album }));
+  assert.equal(cs.filter((c) => c.method === "sendPhoto").length, 0);
 
   // повторное исправление: кнопка на самом фото — меняется подпись, а не текст
   const photoMsg = { message_id: reopened.orig_message_id, date: 0, chat: G, photo: [{ file_id: "x" }] };
