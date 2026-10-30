@@ -1,4 +1,5 @@
 // Тема фото-исправлений: под каждым фото — кнопка «Отправить фото исправление».
+import { FIXED_PNG, VIOLATION_PNG } from "./banners.js";
 import { photoFixKeyboard } from "./keyboards.js";
 import { esc, fullName, localParts, mention, threadOf } from "./utils.js";
 
@@ -87,6 +88,50 @@ export async function onFixButton(ctx, call) {
   if (prompt) await ctx.db.setFixPrompt(fixId, prompt.message_id);
 }
 
+const fromBase64 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+const streamOf = (bytes) => new Blob([bytes]).stream();
+
+// Рисует полосу (НАРУШЕНИЕ / ИСПРАВЛЕНО) поверх верхней части фото через Cloudflare Images
+async function stamp(images, photo, bannerB64) {
+  const { width } = await images.info(streamOf(photo));
+  const banner = images.input(streamOf(fromBase64(bannerB64))).transform({ width });
+  const result = await images.input(streamOf(photo))
+    .draw(banner, { top: 0, left: 0 })
+    .output({ format: "image/jpeg" });
+  return new Blob([await result.response().arrayBuffer()], { type: "image/jpeg" });
+}
+
+// Альбом из двух фото с отметками; без Cloudflare Images (или при ошибке) — без отметок
+async function sendFixAlbum(ctx, chatId, threadId, origFileId, fixFileId, caption) {
+  const media = [
+    { type: "photo", media: origFileId, caption, parse_mode: "HTML" },
+    { type: "photo", media: fixFileId },
+  ];
+  if (ctx.images) {
+    try {
+      const [violation, fixed] = await Promise.all([
+        ctx.tg.download(origFileId).then((p) => stamp(ctx.images, p, VIOLATION_PNG)),
+        ctx.tg.download(fixFileId).then((p) => stamp(ctx.images, p, FIXED_PNG)),
+      ]);
+      const form = new FormData();
+      form.append("chat_id", String(chatId));
+      if (threadId) form.append("message_thread_id", String(threadId));
+      form.append("media", JSON.stringify([
+        { ...media[0], media: "attach://violation" },
+        { ...media[1], media: "attach://fixed" },
+      ]));
+      form.append("violation", violation, "violation.jpg");
+      form.append("fixed", fixed, "fixed.jpg");
+      return await ctx.tg.call("sendMediaGroup", form);
+    } catch (e) {
+      console.warn("Не удалось отметить фото, отправляю без отметок:", String(e));
+    }
+  }
+  const params = { chat_id: chatId, media };
+  if (threadId) params.message_thread_id = threadId;
+  return ctx.tg.safe("sendMediaGroup", params);
+}
+
 async function finishFix(ctx, msg, fix) {
   await ctx.db.completePhotoFix(fix.id, msg.message_id);
   const chatId = msg.chat.id;
@@ -100,16 +145,9 @@ async function finishFix(ctx, msg, fix) {
   if (msg.caption) caption += `\n${esc(msg.caption.slice(0, 300))}`;
   caption += `\n\n${thanks}`;
 
-  const params = {
-    chat_id: chatId,
-    media: [
-      { type: "photo", media: fix.orig_file_id, caption: caption.slice(0, CAPTION_LIMIT), parse_mode: "HTML" },
-      { type: "photo", media: msg.photo.at(-1).file_id },
-    ],
-  };
-  if (fix.thread_id) params.message_thread_id = fix.thread_id;
-
-  if (await ctx.tg.safe("sendMediaGroup", params)) {
+  const album = await sendFixAlbum(ctx, chatId, fix.thread_id, fix.orig_file_id,
+    msg.photo.at(-1).file_id, caption.slice(0, CAPTION_LIMIT));
+  if (album) {
     // Альбом опубликован — убираем из чата исходные фото и служебные сообщения бота,
     // чтобы фотографии не дублировались
     for (const id of [fix.orig_message_id, msg.message_id, fix.button_message_id, fix.prompt_message_id]) {

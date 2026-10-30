@@ -31,6 +31,7 @@ const calls = [];
 const tgState = { webhook: "", queue: [] };
 let nextId = 5000;
 globalThis.fetch = async (url, init) => {
+  if (url.includes("/file/bot")) return new Response(new Uint8Array([1, 2, 3, url.length]));
   const method = url.split("/").pop();
   const params = init.body instanceof FormData ? Object.fromEntries(init.body) : JSON.parse(init.body);
   calls.push({ method, params });
@@ -39,7 +40,8 @@ globalThis.fetch = async (url, init) => {
   else if (method === "getWebhookInfo") result = { url: tgState.webhook, pending_update_count: 0 };
   else if (method === "getUpdates") {
     result = tgState.queue.filter((u) => u.update_id >= (params.offset || 0));
-  } else if (method === "getMe") result = { id: 1, is_bot: true, username: "test_bot" };
+  } else if (method === "getFile") result = { file_path: `photos/${params.file_id}.jpg` };
+  else if (method === "getMe") result = { id: 1, is_bot: true, username: "test_bot" };
   else if (["sendMessage", "sendDocument"].includes(method)) {
     result = { message_id: nextId++, chat: { id: params.chat_id }, date: 0 };
   } else if (method === "copyMessage") result = { message_id: nextId++ };
@@ -338,4 +340,55 @@ test("напоминание о фото без исправления чере�
   assert.equal(reminders(cs).length, 0, "напоминаем один раз");
   delete env.PHOTO_REMIND_FROM;
   delete env.PHOTO_REMIND_TO;
+});
+
+// --- имитация Cloudflare Images: записывает, что нарисовано поверх фото ---
+const drawn = [];
+const fakeImages = {
+  async info() { return { format: "image/jpeg", width: 960, height: 1280 }; },
+  input(stream) {
+    const ops = { stream, transforms: [], draws: [] };
+    const chain = {
+      ops,
+      transform(t) { ops.transforms.push(t); return chain; },
+      draw(overlay, opts) { ops.draws.push({ overlay: overlay.ops, opts }); return chain; },
+      async output(o) {
+        drawn.push({ draws: ops.draws, output: o });
+        return { response: () => new Response(new Uint8Array([9, 9])) };
+      },
+    };
+    return chain;
+  },
+};
+
+test("на фото рисуются полосы НАРУШЕНИЕ / ИСПРАВЛЕНО", async () => {
+  tgState.webhook = "https://bot.example.workers.dev/webhook";
+  env.IMAGES = fakeImages;
+  await photo(ALI, "грязно на складе");
+  const fix = await DB.prepare("SELECT * FROM photo_fixes ORDER BY id DESC LIMIT 1").first();
+  await press(VALI, `fix:${fix.id}`, { message_id: fix.button_message_id, date: 0, chat: G, text: "x" });
+  const cs = await during(() => photo(VALI, "убрал"));
+
+  assert.equal(drawn.length, 2, "обе фотографии отмечены");
+  for (const d of drawn) {
+    assert.deepEqual(d.draws[0].opts, { top: 0, left: 0 });
+    assert.deepEqual(d.draws[0].overlay.transforms, [{ width: 960 }], "полоса во всю ширину фото");
+  }
+  const album = one(cs, "sendMediaGroup");
+  const media = JSON.parse(album.params.media);
+  assert.deepEqual(media.map((m) => m.media), ["attach://violation", "attach://fixed"]);
+  assert.match(media[0].caption, /Нарушение[\s\S]*Исправил\(а\)[\s\S]*Спасибо за исправление/);
+  assert.ok(album.params.violation instanceof Blob && album.params.fixed instanceof Blob);
+  assert.equal(album.params.message_thread_id, "7");
+  assert.ok(cs.some((c) => c.method === "deleteMessage" && c.params.message_id === fix.orig_message_id));
+
+  // Если Cloudflare Images недоступен — альбом уходит без отметок
+  env.IMAGES = { info: async () => { throw new Error("Images недоступен"); } };
+  await photo(ALI, "ещё нарушение");
+  const fix2 = await DB.prepare("SELECT * FROM photo_fixes ORDER BY id DESC LIMIT 1").first();
+  await press(VALI, `fix:${fix2.id}`, { message_id: fix2.button_message_id, date: 0, chat: G, text: "x" });
+  const cs2 = await during(() => photo(VALI, "исправил"));
+  const plain = one(cs2, "sendMediaGroup");
+  assert.equal(plain.params.media[0].media, fix2.orig_file_id);
+  delete env.IMAGES;
 });

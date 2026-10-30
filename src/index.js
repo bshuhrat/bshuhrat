@@ -40,7 +40,7 @@ async function makeContext(env) {
   const db = new Database(env.DB);
   await db.init();
   if (!botUsername) botUsername = await db.getSetting("bot_username");
-  return { db, tg: new Telegram(tokenOf(env)), cfg: loadConfig(env) };
+  return { db, tg: new Telegram(tokenOf(env)), cfg: loadConfig(env), images: env.IMAGES };
 }
 
 // Секрет вебхука выводится из токена — отдельная настройка не нужна

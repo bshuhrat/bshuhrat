@@ -22,6 +22,14 @@ export class Telegram {
     return data.result;
   }
 
+  // Скачивает файл (например, фото) по file_id
+  async download(fileId) {
+    const file = await this.call("getFile", { file_id: fileId });
+    const res = await fetch(this.base.replace("/bot", "/file/bot") + file.file_path);
+    if (!res.ok) throw new TelegramError(`download: HTTP ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
   // Как call, но вместо ошибки возвращает null (например, админ не нажал /start)
   async safe(method, params) {
     try {

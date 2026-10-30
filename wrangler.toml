@@ -1,6 +1,6 @@
 name = "telegram-tasks-bot"
 main = "src/index.js"
-compatibility_date = "2026-10-01"
+compatibility_date = "2026-09-20"
 # Не затирать переменные, заданные в панели Cloudflare, при каждом деплое
 keep_vars = true
 
@@ -8,6 +8,10 @@ keep_vars = true
 [[d1_databases]]
 binding = "DB"
 database_name = "telegram-tasks-bot"
+
+# Cloudflare Images — рисует полосы «НАРУШЕНИЕ» / «ИСПРАВЛЕНО» на фото
+[images]
+binding = "IMAGES"
 
 # Планировщик: каждую минуту проверяет дедлайны, отчёт и фото-исправления
 [triggers]
