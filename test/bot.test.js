@@ -178,7 +178,9 @@ test("фото-исправления", async () => {
 
   cs = await during(() => photo(ALI, "Тут ошибка в цене"));
   const btn = one(cs, "sendMessage");
-  assert.equal(btn.params.reply_markup.inline_keyboard[0][0].text, "📷 Отправить фото исправление");
+  const button = btn.params.reply_markup.inline_keyboard[0][0];
+  assert.equal(button.text, "📸 Отправить фото исправление");
+  assert.equal(button.style, "danger", "кнопка яркая");
   assert.equal(btn.params.message_thread_id, 7);
   const fix = await DB.prepare("SELECT * FROM photo_fixes WHERE id = 1").first();
   const btnMsg = { message_id: fix.button_message_id, date: 0, chat: G, text: "x" };
@@ -187,10 +189,19 @@ test("фото-исправления", async () => {
   const edit = one(cs, "editMessageText");
   assert.deepEqual(edit.params.reply_markup.inline_keyboard, [], "кнопка удалена");
   assert.match(edit.params.text, /Исправление отправляет/);
+  const prompt = cs.find((c) => c.method === "sendMessage" && c.params.reply_markup?.force_reply);
+  assert.ok(prompt, "после нажатия сразу открывается ответ");
+  assert.equal(prompt.params.reply_markup.selective, true);
+  assert.match(prompt.params.reply_markup.input_field_placeholder, /фото/);
+  assert.equal(prompt.params.message_thread_id, 7);
   cs = await during(() => press(SAMI, "fix:1", btnMsg));
   assert.match(one(cs, "answerCallbackQuery").params.text, /уже отправляет Vali/);
 
-  cs = await during(() => photo(VALI, "исправил цену"));
+  const promptMsg = { message_id: (await DB.prepare("SELECT prompt_message_id AS id FROM photo_fixes WHERE id = 1").first()).id,
+    date: 0, chat: G, text: "prompt" };
+  cs = await during(() => photo(VALI, "исправил цену", { reply: promptMsg }));
+  assert.ok(cs.some((c) => c.method === "deleteMessage" && c.params.message_id === promptMsg.message_id),
+    "подсказка удаляется после исправления");
   const album = one(cs, "sendMediaGroup");
   assert.equal(album.params.media.length, 2);
   assert.equal(album.params.media[0].media, fix.orig_file_id);
@@ -286,4 +297,41 @@ test("лишние пробелы в токене не мешают", async () =
     body: JSON.stringify({ update_id: updateId++ }),
   }), { ...env, BOT_TOKEN: ` ${TOKEN}\n` });
   assert.equal(res.status, 200);
+});
+
+test("напоминание о фото без исправления через 7 часов, только днём", async () => {
+  tgState.webhook = "https://bot.example.workers.dev/webhook";
+  await photo(ALI, "ждёт исправления");
+  const fix = await DB.prepare("SELECT * FROM photo_fixes ORDER BY id DESC LIMIT 1").first();
+  const sixHours = new Date(Date.now() - 6 * 3_600_000).toISOString();
+  const eightHours = new Date(Date.now() - 8 * 3_600_000).toISOString();
+  sqlite.prepare("UPDATE photo_fixes SET created_at = ? WHERE id = ?").run(sixHours, fix.id);
+  env.PHOTO_REMIND_FROM = "00:00";
+  env.PHOTO_REMIND_TO = "23:59";
+  const reminders = (cs) => texts(cs).filter((t) => /Нужно исправить/.test(t));
+
+  let cs = await during(runCron);
+  assert.equal(reminders(cs).length, 0, "ещё не прошло 7 часов");
+
+  sqlite.prepare("UPDATE photo_fixes SET created_at = ? WHERE id = ?").run(eightHours, fix.id);
+  env.PHOTO_REMIND_FROM = "23:59";
+  env.PHOTO_REMIND_TO = "23:59";
+  cs = await during(runCron);
+  assert.equal(reminders(cs).length, 0, "ночью не напоминаем");
+
+  env.PHOTO_REMIND_FROM = "00:00";
+  cs = await during(runCron);
+  const reminder = cs.find((c) => /Нужно исправить/.test(c.params.text || ""));
+  assert.ok(reminder);
+  assert.equal(reminder.params.reply_parameters.message_id, fix.orig_message_id);
+  assert.equal(reminder.params.reply_markup.inline_keyboard[0][0].callback_data, `fix:${fix.id}`);
+  assert.ok(cs.some((c) => c.method === "deleteMessage" && c.params.message_id === fix.button_message_id),
+    "старая кнопка убрана");
+  const after = await DB.prepare("SELECT button_message_id FROM photo_fixes WHERE id = ?").bind(fix.id).first();
+  assert.notEqual(after.button_message_id, fix.button_message_id);
+
+  cs = await during(runCron);
+  assert.equal(reminders(cs).length, 0, "напоминаем один раз");
+  delete env.PHOTO_REMIND_FROM;
+  delete env.PHOTO_REMIND_TO;
 });

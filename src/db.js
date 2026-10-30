@@ -36,11 +36,19 @@ const SCHEMA = [
     orig_message_id INTEGER NOT NULL, orig_file_id TEXT NOT NULL, orig_caption TEXT,
     orig_user_id INTEGER NOT NULL, orig_name TEXT NOT NULL, button_message_id INTEGER,
     status TEXT NOT NULL DEFAULT 'open', -- open | claimed | done
-    fixer_id INTEGER, fixer_name TEXT, claimed_at TEXT, fix_message_id INTEGER, done_at TEXT)`,
+    fixer_id INTEGER, fixer_name TEXT, claimed_at TEXT, fix_message_id INTEGER, done_at TEXT,
+    created_at TEXT, reminded INTEGER NOT NULL DEFAULT 0, prompt_message_id INTEGER)`,
   // Состояние диалога с админом (ждём комментарий / ответ)
   `CREATE TABLE IF NOT EXISTS states (
     user_id INTEGER PRIMARY KEY, state TEXT NOT NULL, data TEXT)`,
   `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)`,
+];
+
+// Новые столбцы для баз, созданных старой версией бота (ошибка = столбец уже есть)
+const MIGRATIONS = [
+  "ALTER TABLE photo_fixes ADD COLUMN created_at TEXT",
+  "ALTER TABLE photo_fixes ADD COLUMN reminded INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE photo_fixes ADD COLUMN prompt_message_id INTEGER",
 ];
 
 let schemaReady = false;
@@ -53,6 +61,14 @@ export class Database {
   async init() {
     if (schemaReady) return;
     await this.d1.batch(SCHEMA.map((sql) => this.d1.prepare(sql)));
+    for (const sql of MIGRATIONS) {
+      try {
+        await this.d1.prepare(sql).run();
+      } catch {
+        // столбец уже существует
+      }
+    }
+    await this.run("UPDATE photo_fixes SET created_at = ? WHERE created_at IS NULL", nowIso());
     schemaReady = true;
   }
 
@@ -296,14 +312,18 @@ export class Database {
   async createPhotoFix(chatId, threadId, messageId, fileId, caption, userId, name) {
     const r = await this.run(
       `INSERT INTO photo_fixes (chat_id, thread_id, orig_message_id, orig_file_id, orig_caption,
-       orig_user_id, orig_name) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      chatId, threadId, messageId, fileId, caption || null, userId, name,
+       orig_user_id, orig_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      chatId, threadId, messageId, fileId, caption || null, userId, name, nowIso(),
     );
     return r.lastId;
   }
 
   setFixButton(fixId, messageId) {
     return this.run("UPDATE photo_fixes SET button_message_id = ? WHERE id = ?", messageId, fixId);
+  }
+
+  setFixPrompt(fixId, messageId) {
+    return this.run("UPDATE photo_fixes SET prompt_message_id = ? WHERE id = ?", messageId, fixId);
   }
 
   getPhotoFix(id) {
@@ -324,9 +344,10 @@ export class Database {
   async claimedFixFor(chatId, threadId, userId, buttonMessageId = null) {
     if (buttonMessageId) {
       const row = await this.one(
-        `SELECT * FROM photo_fixes WHERE chat_id = ? AND button_message_id = ?
+        `SELECT * FROM photo_fixes WHERE chat_id = ?
+         AND (button_message_id = ? OR prompt_message_id = ?)
          AND status = 'claimed' AND fixer_id = ?`,
-        chatId, buttonMessageId, userId,
+        chatId, buttonMessageId, buttonMessageId, userId,
       );
       if (row) return row;
     }
@@ -352,10 +373,23 @@ export class Database {
 
   releasePhotoFix(fixId) {
     return this.run(
-      `UPDATE photo_fixes SET status = 'open', fixer_id = NULL, fixer_name = NULL, claimed_at = NULL
-       WHERE id = ? AND status = 'claimed'`,
+      `UPDATE photo_fixes SET status = 'open', fixer_id = NULL, fixer_name = NULL, claimed_at = NULL,
+       prompt_message_id = NULL WHERE id = ? AND status = 'claimed'`,
       fixId,
     );
+  }
+
+  // Фото без исправления дольше заданного времени, о которых ещё не напоминали
+  unfixedPhotos(beforeIso, limit) {
+    return this.all(
+      `SELECT * FROM photo_fixes WHERE status = 'open' AND reminded = 0 AND created_at < ?
+       ORDER BY id LIMIT ?`,
+      beforeIso, limit,
+    );
+  }
+
+  markFixReminded(fixId) {
+    return this.run("UPDATE photo_fixes SET reminded = 1 WHERE id = ?", fixId);
   }
 
   donePhotoFixes() {

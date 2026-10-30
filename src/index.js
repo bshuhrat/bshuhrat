@@ -10,19 +10,28 @@ let botUsername = null;
 // Токен без случайных пробелов и переносов строки при вставке
 const tokenOf = (env) => String(env.BOT_TOKEN || "").trim();
 
+// "9:00" -> "09:00"
+function hhmm(value) {
+  const [hh = "0", mm = "0"] = String(value).trim().split(":");
+  return `${hh.padStart(2, "0")}:${mm.padStart(2, "0")}`;
+}
+
 function loadConfig(env) {
   if (!tokenOf(env)) throw new Error("Не задан секрет BOT_TOKEN");
   const adminIds = new Set(
     String(env.ADMIN_IDS || "").split(",").map((s) => s.trim()).filter(Boolean).map(Number),
   );
-  const [hh = "20", mm = "00"] = String(env.DAILY_REPORT_TIME || "20:00").split(":");
+
   return {
     adminIds,
     groupId: env.GROUP_ID ? Number(env.GROUP_ID) : null,
     timezone: env.TIMEZONE || "Europe/Moscow",
-    dailyReportTime: `${hh.padStart(2, "0")}:${mm.padStart(2, "0")}`,
+    dailyReportTime: hhmm(env.DAILY_REPORT_TIME || "20:00"),
     remindBeforeHours: Number(env.REMIND_BEFORE_HOURS || 24),
     photoFixTimeoutMin: Number(env.PHOTO_FIX_TIMEOUT_MIN || 60),
+    photoRemindHours: Number(env.PHOTO_REMIND_HOURS || 7),
+    photoRemindFrom: hhmm(env.PHOTO_REMIND_FROM || "09:00"),
+    photoRemindTo: hhmm(env.PHOTO_REMIND_TO || "23:59"),
     botUsername,
   };
 }

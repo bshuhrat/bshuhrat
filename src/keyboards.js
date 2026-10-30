@@ -20,5 +20,6 @@ export const requestKeyboard = (reqId) => ({
 });
 
 export const photoFixKeyboard = (fixId) => ({
-  inline_keyboard: [[btn("📷 Отправить фото исправление", `fix:${fixId}`)]],
+  // style: "danger" — яркая красная кнопка (Bot API 9.4+); старые клиенты покажут обычную
+  inline_keyboard: [[{ ...btn("📸 Отправить фото исправление", `fix:${fixId}`), style: "danger" }]],
 });

@@ -1,5 +1,5 @@
 // Запускается Cloudflare каждую минуту: дедлайны, ежедневный отчёт, фото-исправления.
-import { releaseExpired } from "./photofix.js";
+import { releaseExpired, remindUnfixed } from "./photofix.js";
 import { notifyAdmins } from "./services.js";
 import { fullReport, participants, taskSummary } from "./stats.js";
 import { esc, fmtDt, localParts, mention } from "./utils.js";
@@ -50,7 +50,7 @@ async function checkDailyReport(ctx) {
 }
 
 export async function runScheduled(ctx) {
-  for (const job of [checkDeadlines, checkDailyReport, releaseExpired]) {
+  for (const job of [checkDeadlines, checkDailyReport, releaseExpired, remindUnfixed]) {
     try {
       await job(ctx);
     } catch (e) {

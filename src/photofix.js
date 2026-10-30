@@ -1,10 +1,28 @@
 // Тема фото-исправлений: под каждым фото — кнопка «Отправить фото исправление».
 import { photoFixKeyboard } from "./keyboards.js";
-import { esc, fullName, mention, threadOf } from "./utils.js";
+import { esc, fullName, localParts, mention, threadOf } from "./utils.js";
 
 const CAPTION_LIMIT = 1024;
+// Не больше напоминаний за один запуск (лимит запросов Cloudflare на бесплатном тарифе)
+const REMIND_BATCH = 10;
 
 const openText = (fix) => `📷 Фото от ${mention(fix.orig_user_id, fix.orig_name)}`;
+const CALL_TO_ACTION = "\n👇 Есть ошибка? Нажмите кнопку и пришлите исправленное фото.";
+
+const isoMinus = (ms) => new Date(Date.now() - ms).toISOString().slice(0, 19) + "Z";
+
+// Кнопка под фото. Если Telegram не принял цветную кнопку — отправляем обычную
+async function sendFixButton(ctx, chatId, threadId, replyTo, text, fixId) {
+  const opts = { thread: threadId, replyTo, markup: photoFixKeyboard(fixId) };
+  let sent = await ctx.tg.send(chatId, text, opts);
+  if (!sent) {
+    const plain = photoFixKeyboard(fixId);
+    plain.inline_keyboard[0][0] = { text: plain.inline_keyboard[0][0].text, callback_data: `fix:${fixId}` };
+    sent = await ctx.tg.send(chatId, text, { ...opts, markup: plain });
+  }
+  if (sent) await ctx.db.setFixButton(fixId, sent.message_id);
+  return sent;
+}
 
 // Обрабатывает фото в теме исправлений. true — сообщение обработано
 export async function handlePhoto(ctx, msg) {
@@ -24,10 +42,8 @@ export async function handlePhoto(ctx, msg) {
     msg.chat.id, threadId, msg.message_id, msg.photo.at(-1).file_id,
     msg.caption, user.id, fullName(user),
   );
-  const sent = await ctx.tg.reply(msg, openText(await ctx.db.getPhotoFix(fixId)), {
-    markup: photoFixKeyboard(fixId),
-  });
-  if (sent) await ctx.db.setFixButton(fixId, sent.message_id);
+  const text = openText(await ctx.db.getPhotoFix(fixId)) + CALL_TO_ACTION;
+  await sendFixButton(ctx, msg.chat.id, threadId, msg.message_id, text, fixId);
   return true;
 }
 
@@ -41,22 +57,34 @@ export async function onFixButton(ctx, call) {
   const name = fullName(call.from);
   if (!(await ctx.db.claimPhotoFix(fixId, call.from.id, name))) {
     fix = await ctx.db.getPhotoFix(fixId);
-    const who = fix.fixer_name || "другой участник";
-    await ctx.tg.answer(call.id, `Исправление уже отправляет ${who}.`, true);
+    await ctx.tg.answer(call.id, fix.status === "done"
+      ? "Это фото уже исправлено."
+      : `Исправление уже отправляет ${fix.fixer_name || "другой участник"}.`, true);
     return;
   }
+  await ctx.tg.answer(call.id, "📸 Прикрепите исправленное фото (скрепка 📎 → камера или галерея).");
 
   // Убираем кнопку, чтобы никто другой не взялся за это фото
-  await ctx.tg.edit(
-    call.message.chat.id, call.message.message_id,
-    `${openText(fix)}\n\n🛠 Исправление отправляет ${mention(call.from.id, name)}.\n` +
-      "Пришлите исправленное фото в эту тему (можно ответом на это сообщение).",
-  );
-  await ctx.tg.answer(
-    call.id,
-    `Пришлите исправленное фото в эту тему в течение ${ctx.cfg.photoFixTimeoutMin} мин.`,
-    true,
-  );
+  const chatId = call.message.chat.id;
+  await ctx.tg.edit(chatId, call.message.message_id,
+    `${openText(fix)}\n\n🛠 Исправление отправляет ${mention(call.from.id, name)}.`);
+
+  // Сообщение с «принудительным ответом»: у нажавшего сразу открывается ответ
+  // с подсказкой — остаётся нажать скрепку и выбрать камеру или галерею.
+  // (Открыть камеру напрямую Telegram ботам не позволяет.)
+  const prompt = await ctx.tg.send(chatId,
+    `📸 ${mention(call.from.id, name)}, пришлите исправленное фото ответом на это сообщение ` +
+      `(📎 → камера или галерея). Жду ${ctx.cfg.photoFixTimeoutMin} мин.`,
+    {
+      thread: fix.thread_id,
+      replyTo: call.message.message_id,
+      markup: {
+        force_reply: true,
+        selective: true,
+        input_field_placeholder: "Прикрепите исправленное фото 📎",
+      },
+    });
+  if (prompt) await ctx.db.setFixPrompt(fixId, prompt.message_id);
 }
 
 async function finishFix(ctx, msg, fix) {
@@ -86,20 +114,39 @@ async function finishFix(ctx, msg, fix) {
       `${openText(fix)}\n\n✅ Исправлено: ${mention(msg.from.id, fixer)}`,
     );
   }
+  if (fix.prompt_message_id) await ctx.tg.del(msg.chat.id, fix.prompt_message_id);
   await ctx.tg.reply(msg, `🙏 Спасибо за исправление, ${mention(msg.from.id, fixer)}!`);
 }
 
 // Если взявшийся не прислал фото вовремя — возвращаем кнопку всем
 export async function releaseExpired(ctx) {
-  const before = new Date(Date.now() - ctx.cfg.photoFixTimeoutMin * 60_000);
-  const beforeIso = before.toISOString().slice(0, 19) + "Z";
-  for (const fix of await ctx.db.expiredPhotoFixes(beforeIso)) {
+  for (const fix of await ctx.db.expiredPhotoFixes(isoMinus(ctx.cfg.photoFixTimeoutMin * 60_000))) {
     await ctx.db.releasePhotoFix(fix.id);
+    if (fix.prompt_message_id) await ctx.tg.del(fix.chat_id, fix.prompt_message_id);
     if (!fix.button_message_id) continue;
     await ctx.tg.edit(
       fix.chat_id, fix.button_message_id,
       `${openText(fix)}\n\n⌛ ${esc(fix.fixer_name)} не прислал(а) исправление — кнопка снова доступна.`,
       photoFixKeyboard(fix.id),
     );
+  }
+}
+
+// Через N часов напоминаем о фото без исправления — только в дневное время
+export async function remindUnfixed(ctx) {
+  const { photoRemindHours, photoRemindFrom, photoRemindTo, timezone } = ctx.cfg;
+  const now = localParts(new Date(), timezone).time;
+  if (now < photoRemindFrom || now > photoRemindTo) return;
+
+  for (const fix of await ctx.db.unfixedPhotos(isoMinus(photoRemindHours * 3_600_000), REMIND_BATCH)) {
+    await ctx.db.markFixReminded(fix.id);
+    // Старую кнопку убираем, новую ставим под напоминанием — чтобы была на виду
+    if (fix.button_message_id && !(await ctx.tg.del(fix.chat_id, fix.button_message_id))) {
+      await ctx.tg.edit(fix.chat_id, fix.button_message_id, openText(fix));
+    }
+    await sendFixButton(ctx, fix.chat_id, fix.thread_id, fix.orig_message_id,
+      `⏰ <b>Нужно исправить!</b>\n${openText(fix)} ждёт исправления уже больше ` +
+        `${photoRemindHours} ч.${CALL_TO_ACTION}`,
+      fix.id);
   }
 }
