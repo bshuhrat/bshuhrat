@@ -40,6 +40,11 @@ globalThis.fetch = async (url, init) => {
   else if (method === "getWebhookInfo") result = { url: tgState.webhook, pending_update_count: 0 };
   else if (method === "getUpdates") {
     result = tgState.queue.filter((u) => u.update_id >= (params.offset || 0));
+  } else if (method === "getChatAdministrators") {
+    result = [{ status: "creator", user: ADM }, { status: "administrator", user: GADM },
+      { status: "administrator", user: { id: 1, is_bot: true, first_name: "test_bot" } }];
+  } else if (method === "getChatMember") {
+    result = { status: params.user_id === GADM.id ? "administrator" : "member", user: { id: params.user_id } };
   } else if (method === "getFile") result = { file_path: `photos/${params.file_id}.jpg` };
   else if (method === "getMe") result = { id: 1, is_bot: true, username: "test_bot" };
   else if (["sendMessage", "sendDocument", "sendPhoto"].includes(method)) {
@@ -61,6 +66,7 @@ const ADM = { id: 100, is_bot: false, first_name: "Admin" };
 const ALI = { id: 1, is_bot: false, first_name: "Ali" };
 const VALI = { id: 2, is_bot: false, first_name: "Vali" };
 const SAMI = { id: 3, is_bot: false, first_name: "Sami" };
+const GADM = { id: 50, is_bot: false, first_name: "GroupAdmin" }; // админ группы, не в ADMIN_IDS
 
 async function send(update) {
   const res = await worker.fetch(new Request(`${ORIGIN}/webhook`, {
@@ -216,9 +222,13 @@ test("фото-исправления", async () => {
   for (const id of [fix.orig_message_id, fixMsgId, fix.button_message_id, promptMsg.message_id]) {
     assert.ok(deleted.includes(id), `удалено сообщение ${id}`);
   }
-  const extra = cs.filter((c) => c.method === "sendMessage");
-  assert.equal(extra.length, 1, "только строка с кнопкой для админов");
-  assert.equal(extra[0].params.reply_markup.inline_keyboard[0][0].callback_data, "ret:1");
+  const sent = cs.filter((c) => c.method === "sendMessage");
+  assert.equal(sent.filter((c) => c.params.chat_id === G.id).length, 0, "в теме нет лишних сообщений");
+  assert.deepEqual(sent.map((c) => c.params.chat_id).sort((a, b) => a - b), [50, 100], "кнопка — в личку админам");
+  for (const c of sent) {
+    assert.equal(c.params.reply_markup.inline_keyboard[0][0].callback_data, "ret:1");
+    assert.match(c.params.text, /Нарушение — .*Ali[\s\S]*Исправил\(а\) — .*Vali[\s\S]*t\.me\/c\/1\/7\//);
+  }
 
   // Взялся, но не прислал — кнопка возвращается по таймауту
   await photo(ALI, "ещё одно");
@@ -404,18 +414,25 @@ test("админ возвращает исправленное фото в ра�
   assert.equal(done.status, "done");
   const albumIds = JSON.parse(done.result_message_ids);
   assert.equal(albumIds.length, 2);
-  const control = { message_id: done.control_message_id, date: 0, chat: G, text: "x" };
+  const adminMsgs = JSON.parse(done.admin_messages);
+  assert.equal(adminMsgs.length, 2);
+  const [gadmChat, gadmMsg] = adminMsgs.find(([chat]) => chat === GADM.id);
+  const control = { message_id: gadmMsg, date: 0, chat: { id: gadmChat, type: "private" }, text: "x" };
 
   // обычный участник вернуть не может
   let cs = await during(() => press(SAMI, `ret:${fix.id}`, control));
   assert.match(one(cs, "answerCallbackQuery").params.text, /только администратор/);
 
-  cs = await during(() => press(ADM, `ret:${fix.id}`, control));
+  // админ группы (не из ADMIN_IDS) — может
+  cs = await during(() => press(GADM, `ret:${fix.id}`, control));
   const deleted = cs.filter((c) => c.method === "deleteMessage").map((c) => c.params.message_id);
-  for (const id of [...albumIds, done.control_message_id]) assert.ok(deleted.includes(id), `удалено ${id}`);
+  for (const id of albumIds) assert.ok(deleted.includes(id), `удалено ${id}`);
+  const edits = cs.filter((c) => c.method === "editMessageText");
+  assert.deepEqual(edits.map((c) => c.params.chat_id).sort((a, b) => a - b), [50, 100], "кнопка убрана у всех админов");
+  assert.match(edits[0].params.text, /возвращено в работу[\s\S]*GroupAdmin/);
   const again = one(cs, "sendPhoto");
   assert.equal(again.params.photo, fix.orig_file_id, "исходное фото без отметок");
-  assert.match(again.params.caption, /Возвращено в работу[\s\S]*Vali/);
+  assert.match(again.params.caption, /Возвращено в работу[\s\S]*GroupAdmin[\s\S]*Vali/);
   assert.equal(again.params.reply_markup.inline_keyboard[0][0].callback_data, `fix:${fix.id}`);
   assert.equal(again.params.message_thread_id, 7);
   const reopened = await DB.prepare("SELECT * FROM photo_fixes WHERE id = ?").bind(fix.id).first();

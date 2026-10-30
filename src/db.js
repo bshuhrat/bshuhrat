@@ -38,7 +38,7 @@ const SCHEMA = [
     status TEXT NOT NULL DEFAULT 'open', -- open | claimed | done
     fixer_id INTEGER, fixer_name TEXT, claimed_at TEXT, fix_message_id INTEGER, done_at TEXT,
     created_at TEXT, reminded INTEGER NOT NULL DEFAULT 0, prompt_message_id INTEGER,
-    result_message_ids TEXT, control_message_id INTEGER)`,
+    result_message_ids TEXT, control_message_id INTEGER, admin_messages TEXT)`,
   // Состояние диалога с админом (ждём комментарий / ответ)
   `CREATE TABLE IF NOT EXISTS states (
     user_id INTEGER PRIMARY KEY, state TEXT NOT NULL, data TEXT)`,
@@ -52,6 +52,7 @@ const MIGRATIONS = [
   "ALTER TABLE photo_fixes ADD COLUMN prompt_message_id INTEGER",
   "ALTER TABLE photo_fixes ADD COLUMN result_message_ids TEXT",
   "ALTER TABLE photo_fixes ADD COLUMN control_message_id INTEGER",
+  "ALTER TABLE photo_fixes ADD COLUMN admin_messages TEXT",
 ];
 
 let schemaReady = false;
@@ -382,11 +383,12 @@ export class Database {
     );
   }
 
-  // Итоговый альбом и сообщение с кнопкой «Вернуть в работу»
-  setFixResult(fixId, messageIds, controlMessageId) {
+  // Итоговый альбом и сообщения админам в личку с кнопкой «Вернуть в работу»
+  // adminMessages: [[chat_id, message_id], ...]
+  setFixResult(fixId, messageIds, adminMessages) {
     return this.run(
-      "UPDATE photo_fixes SET result_message_ids = ?, control_message_id = ? WHERE id = ?",
-      JSON.stringify(messageIds), controlMessageId, fixId,
+      "UPDATE photo_fixes SET result_message_ids = ?, admin_messages = ? WHERE id = ?",
+      JSON.stringify(messageIds), JSON.stringify(adminMessages), fixId,
     );
   }
 
@@ -395,7 +397,8 @@ export class Database {
     const r = await this.run(
       `UPDATE photo_fixes SET status = 'open', fixer_id = NULL, fixer_name = NULL, claimed_at = NULL,
        fix_message_id = NULL, done_at = NULL, prompt_message_id = NULL, reminded = 0, created_at = ?,
-       result_message_ids = NULL, control_message_id = NULL WHERE id = ? AND status = 'done'`,
+       result_message_ids = NULL, control_message_id = NULL, admin_messages = NULL
+       WHERE id = ? AND status = 'done'`,
       nowIso(), fixId,
     );
     return r.changes > 0;
