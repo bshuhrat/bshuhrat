@@ -241,3 +241,14 @@ test("бот сообщает пользователю его ID", async () => {
   const cs = await during(() => msg(SAMI, "/start", { chat: { id: 3, type: "private" } }));
   assert.match(texts(cs)[0], /Ваш Telegram ID: <code>3<\/code>/);
 });
+
+test("автоподключение по WORKER_URL без браузера", async () => {
+  env.WORKER_URL = "telegram-tasks-bot.demo.workers.dev/";
+  let cs = await during(runCron);
+  const hook = one(cs, "setWebhook");
+  assert.equal(hook.params.url, "https://telegram-tasks-bot.demo.workers.dev/webhook");
+  assert.equal(hook.params.secret_token, secret);
+  cs = await during(runCron);
+  assert.equal(one(cs, "setWebhook"), undefined, "повторно не подключает");
+  delete env.WORKER_URL;
+});

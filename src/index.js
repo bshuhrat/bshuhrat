@@ -61,13 +61,13 @@ const PRIVATE_COMMANDS = [
 ];
 const toCommands = (list) => list.map(([command, description]) => ({ command, description }));
 
-async function setup(env, url) {
+async function setup(env, origin) {
   const ctx = await makeContext(env);
   const me = await ctx.tg.call("getMe");
   botUsername = me.username;
   await ctx.db.setSetting("bot_username", me.username);
   await ctx.tg.call("setWebhook", {
-    url: `${url.origin}/webhook`,
+    url: `${origin}/webhook`,
     secret_token: await webhookSecret(env.BOT_TOKEN),
     allowed_updates: ["message", "callback_query"],
     drop_pending_updates: true,
@@ -82,6 +82,26 @@ async function setup(env, url) {
     "не указаны — напишите боту /start, он пришлёт ваш ID, и впишите его в ADMIN_IDS";
   return `✅ Бот @${me.username} подключён.\nАдминистраторы: ${admins}\n` +
     `Часовой пояс: ${ctx.cfg.timezone}\nТеперь напишите боту /start в Telegram.`;
+}
+
+// Автоподключение без браузера: если задана переменная WORKER_URL, планировщик
+// сам регистрирует вебхук (полезно, когда workers.dev не открывается у провайдера)
+async function autoSetup(env) {
+  if (!env.WORKER_URL || !env.BOT_TOKEN) return;
+  let origin;
+  try {
+    const raw = env.WORKER_URL.trim();
+    origin = new URL(/^https?:\/\//.test(raw) ? raw : `https://${raw}`).origin;
+  } catch {
+    console.error("Неверный WORKER_URL:", env.WORKER_URL);
+    return;
+  }
+  const db = new Database(env.DB);
+  await db.init();
+  const marker = await webhookSecret(env.BOT_TOKEN + "|" + origin);
+  if ((await db.getSetting("auto_setup")) === marker) return;
+  console.log(await setup(env, origin));
+  await db.setSetting("auto_setup", marker);
 }
 
 const text = (body, status = 200) =>
@@ -109,7 +129,7 @@ export default {
         return text("Откройте адрес вида /setup?token=ВАШ_ТОКЕН_БОТА", 403);
       }
       try {
-        return text(await setup(env, url));
+        return text(await setup(env, url.origin));
       } catch (e) {
         return text(`❌ Ошибка: ${e.message}`, 500);
       }
@@ -119,6 +139,13 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(makeContext(env).then(runScheduled));
+    ctx.waitUntil((async () => {
+      try {
+        await autoSetup(env);
+      } catch (e) {
+        console.error("Автоподключение не удалось:", e);
+      }
+      await runScheduled(await makeContext(env));
+    })());
   },
 };
