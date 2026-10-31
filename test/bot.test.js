@@ -729,7 +729,10 @@ test("разбор отчёта ИИ: «разбор» в ответ на фот
   await msg(ALI, "/razbor", { ...T, reply: report2 });
   await runCron();
   cs = await during(runCron);
-  assert.ok(cs.some((c) => c.method === "editMessageText" && /дневной лимит ИИ закончился/.test(c.params.text)));
+  const limitMsg = cs.find((c) => c.method === "editMessageText" && /дневной лимит ИИ закончился/.test(c.params.text));
+  assert.ok(limitMsg);
+  assert.match(limitMsg.params.text, /Причина: Kimi K2\.6: AiError: 4006[\s\S]*Kimi K2\.5[\s\S]*Llama 4 Scout/,
+    "перепробованы все модели, причина видна");
   cs = await during(runCron);
   assert.equal(cs.filter((c) => c.method === "editMessageText" && /лимит/.test(c.params.text || "")).length, 0);
 
@@ -748,4 +751,20 @@ test("разбор отчёта ИИ: «разбор» в ответ на фот
   cs = await during(() => msg(SAMI, "разбор", { ...T, reply: report }));
   assert.match(texts(cs)[0], /не подключён/);
   delete env.REPORT_TOPIC;
+});
+
+test("разбор отчёта: если основная модель упала — отвечает запасная", async () => {
+  tgState.webhook = "https://bot.example.workers.dev/webhook";
+  const used = [];
+  env.AI = { run: async (model) => {
+    used.push(model);
+    if (model === "@cf/moonshotai/kimi-k2.6") throw new Error("AiError: 5006: input format not supported");
+    return { response: "✅ Молодцы: выручка" };
+  } };
+  const report = await photo(ALI, null, { thread: 5 });
+  await msg(SAMI, "Разбор", { thread: 5, reply: report });
+  const cs = await during(runCron);
+  assert.deepEqual(used, ["@cf/moonshotai/kimi-k2.6", "@cf/moonshotai/kimi-k2.5"]);
+  assert.ok(cs.some((c) => c.method === "editMessageText" && /Разбор отчёта[\s\S]*Kimi K2\.5[\s\S]*Молодцы/.test(c.params.text)));
+  delete env.AI;
 });

@@ -4,6 +4,14 @@
 import { esc, fullName, mention, parseCommand, threadOf } from "./utils.js";
 
 export const DEFAULT_AI_MODEL = "@cf/moonshotai/kimi-k2.6";
+// Если основная модель не ответила — пробуем запасные (тоже бесплатные, с поддержкой картинок)
+const FALLBACK_MODELS = ["@cf/moonshotai/kimi-k2.5", "@cf/meta/llama-4-scout-17b-16e-instruct"];
+const MODEL_NAMES = {
+  "@cf/moonshotai/kimi-k2.6": "Kimi K2.6",
+  "@cf/moonshotai/kimi-k2.5": "Kimi K2.5",
+  "@cf/meta/llama-4-scout-17b-16e-instruct": "Llama 4 Scout",
+};
+const modelName = (m) => MODEL_NAMES[m] || m.split("/").pop();
 const JOBS_PER_RUN = 2;
 const MAX_ATTEMPTS = 2;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
@@ -139,7 +147,7 @@ async function analyze(ctx, job) {
   if (norms) prompt += `\nНормы: ${norms}`;
   if (job.caption) prompt += `\nКомментарий к фото: ${job.caption}`;
 
-  const result = await ctx.ai.run(ctx.cfg.aiModel, {
+  const input = {
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       {
@@ -151,10 +159,20 @@ async function analyze(ctx, job) {
       },
     ],
     max_tokens: 4096, // с запасом: Kimi может сначала рассуждать
-  });
-  const text = cleanup(aiText(result));
-  if (!text) throw new Error("пустой ответ модели");
-  return text;
+  };
+
+  // Пробуем модели по очереди; ошибки собираем, чтобы показать причину
+  const errors = [];
+  for (const model of [...new Set([ctx.cfg.aiModel, ...FALLBACK_MODELS])]) {
+    try {
+      const text = cleanup(aiText(await ctx.ai.run(model, input)));
+      if (text) return { text, model };
+      errors.push(`${modelName(model)}: пустой ответ`);
+    } catch (e) {
+      errors.push(`${modelName(model)}: ${String(e?.message || e).slice(0, 160)}`);
+    }
+  }
+  throw new Error(errors.join("; "));
 }
 
 export async function processReportJobs(ctx) {
@@ -163,8 +181,9 @@ export async function processReportJobs(ctx) {
     // Помечаем заранее: если обработка упадёт посреди, задача не зациклится
     await ctx.db.bumpReportJob(job.id);
     try {
-      const text = await analyze(ctx, job);
-      const header = `🤖 <b>Разбор отчёта</b> (запросил(а) ${mention(job.requested_by_id, job.requested_by)})\n\n`;
+      const { text, model } = await analyze(ctx, job);
+      const header = `🤖 <b>Разбор отчёта</b> (запросил(а) ${mention(job.requested_by_id, job.requested_by)}, ` +
+        `${esc(modelName(model))})\n\n`;
       await ctx.tg.edit(job.chat_id, job.placeholder_id, (header + esc(text)).slice(0, 4000));
       await ctx.db.finishReportJob(job.id, "done");
     } catch (e) {
@@ -172,9 +191,10 @@ export async function processReportJobs(ctx) {
       if (job.attempts + 1 >= MAX_ATTEMPTS) {
         await ctx.db.finishReportJob(job.id, "failed");
         const limit = /limit|quota|neuron|4006|429/i.test(String(e));
-        await ctx.tg.edit(job.chat_id, job.placeholder_id, limit
+        const reason = `\n\n<i>Причина: ${esc(String(e?.message || e).slice(0, 600))}</i>`;
+        await ctx.tg.edit(job.chat_id, job.placeholder_id, (limit
           ? "❌ Бесплатный дневной лимит ИИ закончился. Попробуйте завтра — ответьте на фото словом «разбор»."
-          : "❌ Не получилось разобрать отчёт. Попробуйте ещё раз: ответьте на фото словом «разбор».");
+          : "❌ Не получилось разобрать отчёт. Попробуйте ещё раз: ответьте на фото словом «разбор».") + reason);
       }
     }
   }
