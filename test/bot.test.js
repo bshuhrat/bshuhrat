@@ -716,7 +716,8 @@ test("разбор отчёта ИИ: «разбор» в ответ на фот
   const userMsg = aiCalls[0].input.messages[1];
   assert.match(userMsg.content[0].text, /Нормы: доставка до 30 мин; списания до 2%[\s\S]*отчёт за неделю/);
   assert.match(userMsg.content[1].image_url.url, /^data:image\/jpeg;base64,/);
-  const result = cs.find((c) => c.method === "editMessageText" && c.params.message_id === placeholder.params.message_id);
+  const job = await DB.prepare("SELECT placeholder_id FROM report_jobs ORDER BY id LIMIT 1").first();
+  const result = cs.find((c) => c.method === "editMessageText" && c.params.message_id === job.placeholder_id);
   assert.match(result.params.text, /Разбор отчёта[\s\S]*Sami[\s\S]*Молодцы[\s\S]*средний чек 1250[\s\S]*Улучшить/);
   assert.doesNotMatch(result.params.text, /считаю|\*\*/, "без рассуждений и Markdown");
   cs = await during(runCron);
