@@ -46,7 +46,8 @@ const SCHEMA = [
     keyword TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', -- open | fixed | rejected
     created_at TEXT NOT NULL, next_check_at TEXT NOT NULL, checks INTEGER NOT NULL DEFAULT 0,
     bot_message_id INTEGER, check_message_id INTEGER, closed_by_id INTEGER, closed_by_name TEXT,
-    closed_at TEXT, close_message_id INTEGER, photo_file_id TEXT, UNIQUE (chat_id, message_id))`,
+    closed_at TEXT, close_message_id INTEGER, photo_file_id TEXT, check_message_ids TEXT,
+    UNIQUE (chat_id, message_id))`,
   `CREATE TABLE IF NOT EXISTS repair_keywords (
     chat_id INTEGER NOT NULL, keyword TEXT NOT NULL, enabled INTEGER NOT NULL,
     PRIMARY KEY (chat_id, keyword))`,
@@ -64,6 +65,7 @@ const MIGRATIONS = [
   "ALTER TABLE photo_fixes ADD COLUMN result_message_ids TEXT",
   "ALTER TABLE photo_fixes ADD COLUMN control_message_id INTEGER",
   "ALTER TABLE photo_fixes ADD COLUMN admin_messages TEXT",
+  "ALTER TABLE repairs ADD COLUMN check_message_ids TEXT",
 ];
 
 let schemaReady = false;
@@ -468,9 +470,12 @@ export class Database {
     return this.run("UPDATE repairs SET bot_message_id = ? WHERE id = ?", messageId, id);
   }
 
+  // Новое напоминание: запоминаем его, чтобы потом удалить все разом
   setRepairCheckMessage(id, messageId) {
     return this.run(
-      "UPDATE repairs SET check_message_id = ?, checks = checks + 1 WHERE id = ?", messageId, id,
+      `UPDATE repairs SET check_message_id = ?, checks = checks + 1,
+       check_message_ids = json_insert(COALESCE(check_message_ids, '[]'), '$[#]', ?) WHERE id = ?`,
+      messageId, messageId, id,
     );
   }
 
@@ -496,8 +501,10 @@ export class Database {
   repairByAnyMessage(chatId, messageId) {
     return this.one(
       `SELECT * FROM repairs WHERE chat_id = ? AND (message_id = ? OR bot_message_id = ?
-       OR check_message_id = ? OR close_message_id = ?) ORDER BY id DESC LIMIT 1`,
-      chatId, messageId, messageId, messageId, messageId,
+       OR check_message_id = ? OR close_message_id = ?
+       OR EXISTS (SELECT 1 FROM json_each(COALESCE(check_message_ids, '[]')) WHERE value = ?))
+       ORDER BY id DESC LIMIT 1`,
+      chatId, messageId, messageId, messageId, messageId, messageId,
     );
   }
 

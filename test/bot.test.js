@@ -478,87 +478,111 @@ test("поломки: какие фразы ловятся, а какие нет
 test("поломки: просьба оформить заявку и уточнение статуса", async () => {
   tgState.webhook = "https://bot.example.workers.dev/webhook";
   env.REPAIR_TOPIC = "https://t.me/c/1/91";
-  env.REPAIR_SYSTEM_URL = "https://example.com/zayavka";
   const T = { thread: 91 };
   const visible = (cs) => cs.filter((c) => /^(send|delete|edit)/.test(c.method));
+  const noNumbers = (cs) => cs.every((c) => !/№/.test(c.params.text || ""));
 
   let cs = await during(() => msg(ALI, "Я сегодня не работаю", T));
   assert.equal(visible(cs).length, 0);
   cs = await during(() => msg(ALI, "Печь не греет уже час", T));
   const first = one(cs, "sendMessage");
-  assert.match(first.params.text, /Нужна заявка №1[\s\S]*не греет[\s\S]*оформите заявку[\s\S]*example\.com\/zayavka[\s\S]*48 ч/);
+  assert.match(first.params.text, /Нужна заявка[\s\S]*не греет[\s\S]*оформите заявку[\s\S]*48 ч/);
+  assert.ok(noNumbers(cs), "без номеров заявок");
   assert.equal(first.params.message_thread_id, 91);
-  const kb = first.params.reply_markup.inline_keyboard[0].map((b) => b.callback_data);
-  assert.deepEqual(kb, ["rp:1:fixed", "rp:1:notbug"]);
+  // в первом сообщении — только «Сделать заявку»
+  const firstKb = first.params.reply_markup.inline_keyboard;
+  assert.equal(firstKb.length, 1);
+  assert.equal(firstKb[0].length, 1);
+  assert.equal(firstKb[0][0].text, "📝 Сделать заявку");
   const r1 = await DB.prepare("SELECT * FROM repairs WHERE id = 1").first();
   assert.equal(first.params.reply_parameters.message_id, r1.message_id);
   const firstMsg = { message_id: r1.bot_message_id, date: 0, chat: G, text: "x" };
+  cs = await during(() => press(SAMI, firstKb[0][0].callback_data, firstMsg));
+  assert.match(one(cs, "answerCallbackQuery").params.text, /Ссылка на систему заявок скоро появится/);
+
+  // со ссылкой на систему кнопка открывает её сразу
+  env.REPAIR_SYSTEM_URL = "https://example.com/zayavka";
+  cs = await during(() => msg(VALI, "касса не работает", T));
+  assert.equal(one(cs, "sendMessage").params.reply_markup.inline_keyboard[0][0].url, "https://example.com/zayavka");
+  delete env.REPAIR_SYSTEM_URL;
 
   // обсуждение в ответ на поломку — новой заявки нет
   cs = await during(() => msg(VALI, "до сих пор не работает", { ...T, reply: { message_id: r1.message_id, date: 0, chat: G, text: "x" } }));
   assert.equal(visible(cs).length, 0);
 
-  // подтверждение: нажал Сами — подтвердить может только он
-  cs = await during(() => press(SAMI, "rp:1:fixed", firstMsg));
-  const confirm = one(cs, "editMessageText");
-  assert.match(confirm.params.text, /Sami.*подтвердите: заявка <b>№1<\/b>[\s\S]*починили/);
-  assert.deepEqual(confirm.params.reply_markup.inline_keyboard[0].map((b) => b.callback_data),
-    ["rp:1:fixed!:3", "rp:1:back:3"]);
-  cs = await during(() => press(ALI, "rp:1:fixed!:3", firstMsg));
-  assert.match(one(cs, "answerCallbackQuery").params.text, /только тот, кто нажал/);
-  cs = await during(() => press(SAMI, "rp:1:back:3", firstMsg));
-  assert.deepEqual(one(cs, "editMessageText").params.reply_markup.inline_keyboard[0].map((b) => b.callback_data),
-    ["rp:1:fixed", "rp:1:notbug"]);
-  assert.equal((await DB.prepare("SELECT status FROM repairs WHERE id = 1").first()).status, "open");
-
-  // через 48 ч — вопрос о статусе (только днём)
+  // через 48 ч — вопрос о статусе с короткими кнопками (только днём)
   sqlite.prepare("UPDATE repairs SET next_check_at = '2020-01-01T00:00:00Z' WHERE id = 1").run();
   env.PHOTO_REMIND_FROM = "23:59";
   env.PHOTO_REMIND_TO = "23:59";
   cs = await during(runCron);
-  assert.equal(texts(cs).filter((t) => /какой статус/.test(t)).length, 0, "ночью не спрашиваем");
+  assert.equal(texts(cs).filter((t) => /Какой статус/.test(t)).length, 0, "ночью не спрашиваем");
   env.PHOTO_REMIND_FROM = "00:00";
   cs = await during(runCron);
-  const check = cs.find((c) => /Заявка №1 — какой статус/.test(c.params.text || ""));
+  const check = cs.find((c) => /Какой статус/.test(c.params.text || ""));
   assert.ok(check);
+  assert.ok(noNumbers(cs));
   assert.equal(check.params.reply_parameters.message_id, r1.message_id);
+  assert.deepEqual(check.params.reply_markup.inline_keyboard[0].map((b) => b.text), ["✅ Починили", "❌ Не поломка"]);
   let r = await DB.prepare("SELECT * FROM repairs WHERE id = 1").first();
   assert.equal(r.checks, 1);
   const days = (Date.parse(r.next_check_at) - Date.now()) / 86_400_000;
   assert.ok(days > 6.9 && days < 7.1, "следующая проверка через 7 дней");
   cs = await during(runCron);
-  assert.equal(texts(cs).filter((t) => /какой статус/.test(t)).length, 0);
-  const checkMsg = { message_id: r.check_message_id, date: 0, chat: G, text: "x" };
+  assert.equal(texts(cs).filter((t) => /Какой статус/.test(t)).length, 0);
 
-  // «Ещё нет» — без подтверждения, следующий вопрос через 7 дней
-  cs = await during(() => press(VALI, "rp:1:notyet", checkMsg));
-  assert.match(one(cs, "editMessageText").params.text, /Ещё не починили[\s\S]*Vali[\s\S]*7 дн/);
-
-  // «Починили» с подтверждением
-  await press(VALI, "rp:1:fixed", checkMsg);
-  cs = await during(() => press(VALI, "rp:1:fixed!:2", checkMsg));
-  assert.match(one(cs, "editMessageText").params.text, /Заявка №1 — починили[\s\S]*Vali[\s\S]*фото после ремонта/);
-  r = await DB.prepare("SELECT * FROM repairs WHERE id = 1").first();
-  assert.equal(r.status, "fixed");
-  assert.equal(r.close_message_id, checkMsg.message_id);
-  cs = await during(() => press(SAMI, "rp:1:fixed", firstMsg));
-  assert.match(one(cs, "answerCallbackQuery").params.text, /уже закрыта/);
+  // без ответа — ещё одно напоминание через 7 дней
   sqlite.prepare("UPDATE repairs SET next_check_at = '2020-01-01T00:00:00Z' WHERE id = 1").run();
   cs = await during(runCron);
-  assert.equal(texts(cs).filter((t) => /какой статус/.test(t)).length, 0, "закрытые не проверяем");
+  assert.ok(texts(cs).some((t) => /Какой статус/.test(t)));
+  r = await DB.prepare("SELECT * FROM repairs WHERE id = 1").first();
+  const reminders = JSON.parse(r.check_message_ids);
+  assert.equal(reminders.length, 2);
+  const checkMsg = { message_id: reminders[1], date: 0, chat: G, text: "x" };
 
-  // фото после ремонта — по желанию, ответом на сообщение о закрытии
-  cs = await during(() => photo(VALI, null, { thread: 91, reply: checkMsg }));
-  assert.ok(texts(cs).some((t) => /Фото после ремонта добавлено к заявке №1/.test(t)));
+  // подтверждение: нажал Сами — подтвердить может только он
+  cs = await during(() => press(SAMI, "rp:1:fixed", checkMsg));
+  const confirm = one(cs, "editMessageText");
+  assert.match(confirm.params.text, /Sami.*подтвердите: «Печь не греет уже час» — <b>починили<\/b>/);
+  assert.deepEqual(confirm.params.reply_markup.inline_keyboard[0].map((b) => b.callback_data),
+    ["rp:1:fixed!:3", "rp:1:back:3"]);
+  cs = await during(() => press(ALI, "rp:1:fixed!:3", checkMsg));
+  assert.match(one(cs, "answerCallbackQuery").params.text, /только тот, кто нажал/);
+  cs = await during(() => press(SAMI, "rp:1:back:3", checkMsg));
+  assert.deepEqual(one(cs, "editMessageText").params.reply_markup.inline_keyboard[0].map((b) => b.callback_data),
+    ["rp:1:fixed", "rp:1:notbug"]);
+
+  // «Починили» — все напоминания удаляются, итог в первом сообщении бота
+  await press(VALI, "rp:1:fixed", checkMsg);
+  cs = await during(() => press(VALI, "rp:1:fixed!:2", checkMsg));
+  const deleted = cs.filter((c) => c.method === "deleteMessage").map((c) => c.params.message_id);
+  assert.deepEqual(deleted.sort((a, b) => a - b), reminders, "удалены все напоминания");
+  const done = one(cs, "editMessageText");
+  assert.equal(done.params.message_id, r1.bot_message_id);
+  assert.match(done.params.text, /Починили[\s\S]*Vali[\s\S]*фото после ремонта/);
+  assert.equal(done.params.reply_markup.inline_keyboard.length, 0);
+  assert.ok(noNumbers(cs));
+  r = await DB.prepare("SELECT * FROM repairs WHERE id = 1").first();
+  assert.equal(r.status, "fixed");
+  sqlite.prepare("UPDATE repairs SET next_check_at = '2020-01-01T00:00:00Z' WHERE id = 1").run();
+  cs = await during(runCron);
+  assert.equal(texts(cs).filter((t) => /Печь не греет/.test(t)).length, 0, "закрытые не проверяем");
+
+  // фото после ремонта — по желанию, ответом на сообщение «Починили»
+  cs = await during(() => photo(VALI, null, { thread: 91, reply: firstMsg }));
+  assert.ok(texts(cs).some((t) => /Фото после ремонта добавлено/.test(t)));
   assert.ok((await DB.prepare("SELECT photo_file_id FROM repairs WHERE id = 1").first()).photo_file_id);
 
-  // «Это не поломка» — сообщения бота удаляются
+  // «Не поломка» при уточнении — все сообщения бота по ней удаляются
   await msg(ALI, "Течёт кран на кухне", T);
-  const r2 = await DB.prepare("SELECT * FROM repairs ORDER BY id DESC LIMIT 1").first();
-  const m2 = { message_id: r2.bot_message_id, date: 0, chat: G, text: "x" };
+  let r2 = await DB.prepare("SELECT * FROM repairs ORDER BY id DESC LIMIT 1").first();
+  sqlite.prepare("UPDATE repairs SET next_check_at = '2020-01-01T00:00:00Z' WHERE id = ?").run(r2.id);
+  await runCron();
+  r2 = await DB.prepare("SELECT * FROM repairs WHERE id = ?").bind(r2.id).first();
+  const m2 = { message_id: r2.check_message_id, date: 0, chat: G, text: "x" };
   await press(ALI, `rp:${r2.id}:notbug`, m2);
   cs = await during(() => press(ALI, `rp:${r2.id}:notbug!:1`, m2));
-  assert.ok(cs.some((c) => c.method === "deleteMessage" && c.params.message_id === r2.bot_message_id));
+  const del2 = cs.filter((c) => c.method === "deleteMessage").map((c) => c.params.message_id);
+  assert.ok(del2.includes(r2.bot_message_id) && del2.includes(r2.check_message_id));
   assert.equal((await DB.prepare("SELECT status FROM repairs WHERE id = ?").bind(r2.id).first()).status, "rejected");
 
   // слова: админ добавляет и убирает
@@ -571,16 +595,16 @@ test("поломки: просьба оформить заявку и уточн
   cs = await during(() => msg(ALI, "/kw_add взлом", T));
   assert.equal(visible(cs).length, 0, "не-админ не меняет слова");
 
-  // список открытых заявок
+  // список незакрытых поломок — без номеров
   cs = await during(() => msg(SAMI, "/zayavki", T));
-  assert.match(texts(cs)[0], /Открытые заявки \(1\)[\s\S]*дым/);
+  assert.match(texts(cs)[0], /Незакрытые поломки \(2\)[\s\S]*касса не работает[\s\S]*дым/);
+  assert.ok(noNumbers(cs));
 
   // в других темах бот на поломки не реагирует
   cs = await during(() => msg(ALI, "печь не греет", { thread: 5 }));
   assert.equal(texts(cs).filter((t) => /Нужна заявка/.test(t)).length, 0);
 
   delete env.REPAIR_TOPIC;
-  delete env.REPAIR_SYSTEM_URL;
   delete env.PHOTO_REMIND_FROM;
   delete env.PHOTO_REMIND_TO;
 });

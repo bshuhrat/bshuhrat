@@ -77,26 +77,26 @@ function age(fromIso) {
 // ---------- тексты и кнопки ----------
 
 const btn = (text, data, style) => ({ text, callback_data: data, ...(style ? { style } : {}) });
+const quote = (r) => `«${esc(excerpt(r.text))}» — ${mention(r.user_id, r.user_name)}`;
 
 function firstText(ctx, r) {
-  const url = ctx.cfg.repairSystemUrl;
-  const where = url ? ` в системе: <a href="${esc(url)}">оформить заявку</a>` : " в системе заявок";
-  return `🛠 <b>Нужна заявка №${r.id}</b>\n` +
+  return "🛠 <b>Нужна заявка</b>\n" +
     `Похоже на поломку («${esc(r.keyword)}»).\n` +
-    `${mention(r.user_id, r.user_name)}, пожалуйста, <b>оформите заявку</b>${where}.\n\n` +
+    `${mention(r.user_id, r.user_name)}, пожалуйста, <b>оформите заявку</b>.\n\n` +
     `Через ${ctx.cfg.repairFirstCheckHours} ч я уточню, починили ли.`;
 }
-const firstKeyboard = (id) => ({
-  inline_keyboard: [[btn("✅ Уже починили", `rp:${id}:fixed`), btn("❌ Это не поломка", `rp:${id}:notbug`)]],
-});
+// «Сделать заявку»: со ссылкой на систему (REPAIR_SYSTEM_URL) или с подсказкой, пока ссылки нет
+function firstKeyboard(ctx, id) {
+  const url = ctx.cfg.repairSystemUrl;
+  const button = url ? { text: "📝 Сделать заявку", url } : btn("📝 Сделать заявку", `rp:${id}:make`);
+  return { inline_keyboard: [[{ ...button, style: "primary" }]] };
+}
 
 function checkText(r) {
-  return `⏰ <b>Заявка №${r.id} — какой статус?</b>\n` +
-    `«${esc(excerpt(r.text))}» — ${mention(r.user_id, r.user_name)}\n` +
-    `Прошло: ${age(r.created_at)}\n\nПочинили?`;
+  return `⏰ <b>Какой статус?</b>\n${quote(r)}\nПрошло: ${age(r.created_at)}\n\nПочинили?`;
 }
 const checkKeyboard = (id) => ({
-  inline_keyboard: [[btn("✅ Починили", `rp:${id}:fixed`, "success"), btn("🛠 Ещё нет", `rp:${id}:notyet`)]],
+  inline_keyboard: [[btn("✅ Починили", `rp:${id}:fixed`, "success"), btn("❌ Не поломка", `rp:${id}:notbug`)]],
 });
 
 const ACTION_QUESTION = { fixed: "<b>починили</b>", notbug: "<b>это не поломка</b>" };
@@ -104,7 +104,10 @@ const ACTION_CONFIRM = { fixed: "✅ Да, починили", notbug: "✅ Да,
 
 // Отправка/правка с цветными кнопками; без цвета, если Telegram их не принял
 function plain(markup) {
-  return { inline_keyboard: markup.inline_keyboard.map((row) => row.map(({ text, callback_data }) => ({ text, callback_data }))) };
+  return {
+    inline_keyboard: markup.inline_keyboard.map((row) =>
+      row.map(({ text, callback_data, url }) => (url ? { text, url } : { text, callback_data }))),
+  };
 }
 async function sendWithButtons(ctx, chatId, text, opts, markup) {
   return (await ctx.tg.send(chatId, text, { ...opts, markup })) ||
@@ -114,6 +117,8 @@ async function editWithButtons(ctx, chatId, messageId, text, markup) {
   return (await ctx.tg.edit(chatId, messageId, text, markup)) ||
     ctx.tg.edit(chatId, messageId, text, plain(markup));
 }
+
+const checkIds = (r) => JSON.parse(r.check_message_ids || "[]");
 
 // ---------- сообщения в теме ----------
 
@@ -127,10 +132,10 @@ export async function handleRepairMessage(ctx, msg) {
   if (msg.reply_to_message) {
     const related = await ctx.db.repairByAnyMessage(chatId, msg.reply_to_message.message_id);
     if (related) {
-      // Фото «после ремонта» — ответом на сообщение о закрытии (по желанию)
+      // Фото «после ремонта» — ответом на сообщение о том, что починили (по желанию)
       if (msg.photo && related.status === "fixed" && related.close_message_id === msg.reply_to_message.message_id) {
         await ctx.db.setRepairPhoto(related.id, msg.photo.at(-1).file_id);
-        await ctx.tg.reply(msg, `📸 Спасибо! Фото после ремонта добавлено к заявке №${related.id}.`);
+        await ctx.tg.reply(msg, "📸 Спасибо! Фото после ремонта добавлено.");
       }
       return true;
     }
@@ -149,18 +154,12 @@ export async function handleRepairMessage(ctx, msg) {
   if (!id) return true; // это сообщение уже зарегистрировано
   const r = await ctx.db.getRepair(id);
   const sent = await sendWithButtons(ctx, chatId, firstText(ctx, r),
-    { thread: threadId, replyTo: msg.message_id }, firstKeyboard(id));
+    { thread: threadId, replyTo: msg.message_id }, firstKeyboard(ctx, id));
   if (sent) await ctx.db.setRepairBotMessage(id, sent.message_id);
   return true;
 }
 
-// Текст сообщения, на котором нажали кнопку, и его кнопки — чтобы вернуть по «Назад»
-function messageState(ctx, r, messageId) {
-  if (messageId === r.bot_message_id) return { text: firstText(ctx, r), markup: firstKeyboard(r.id) };
-  return { text: checkText(r), markup: checkKeyboard(r.id) };
-}
-
-// Кнопки: rp:<id>:fixed | notbug | notyet — и подтверждение rp:<id>:<действие>!:<user> / back:<user>
+// Кнопки: rp:<id>:make | fixed | notbug — и подтверждение rp:<id>:<действие>!:<user> / back:<user>
 export async function onRepairButton(ctx, call) {
   const [, rawId, action, ownerId] = call.data.split(":");
   const r = await ctx.db.getRepair(Number(rawId));
@@ -171,8 +170,13 @@ export async function onRepairButton(ctx, call) {
     await ctx.tg.answer(call.id, "Заявка не найдена.", true);
     return;
   }
+  if (action === "make") {
+    await ctx.tg.answer(call.id, "Ссылка на систему заявок скоро появится здесь. " +
+      "Пока оформите заявку как обычно.", true);
+    return;
+  }
   if (r.status !== "open") {
-    await ctx.tg.answer(call.id, `Заявка №${r.id} уже закрыта.`, true);
+    await ctx.tg.answer(call.id, "По этой поломке уже есть ответ.", true);
     await ctx.tg.safe("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } });
     return;
   }
@@ -181,12 +185,11 @@ export async function onRepairButton(ctx, call) {
     await ctx.tg.answer(call.id, "Подтвердить может только тот, кто нажал кнопку.", true);
     return;
   }
-  const state = messageState(ctx, r, messageId);
 
   if (action === "fixed" || action === "notbug") {
     await editWithButtons(ctx, chatId, messageId,
-      `${state.text}\n\n❓ ${mention(call.from.id, name)}, подтвердите: заявка <b>№${r.id}</b> ` +
-        `(«${esc(excerpt(r.text))}») — ${ACTION_QUESTION[action]}?`,
+      `${checkText(r)}\n\n❓ ${mention(call.from.id, name)}, подтвердите: ` +
+        `«${esc(excerpt(r.text))}» — ${ACTION_QUESTION[action]}?`,
       { inline_keyboard: [[
         btn(ACTION_CONFIRM[action], `rp:${r.id}:${action}!:${call.from.id}`, "success"),
         btn("↩️ Назад", `rp:${r.id}:back:${call.from.id}`),
@@ -196,48 +199,38 @@ export async function onRepairButton(ctx, call) {
   }
 
   if (action === "back") {
-    await editWithButtons(ctx, chatId, messageId, state.text, state.markup);
+    await editWithButtons(ctx, chatId, messageId, checkText(r), checkKeyboard(r.id));
     await ctx.tg.answer(call.id);
     return;
   }
 
-  if (action === "notyet") {
-    const next = isoIn(ctx.cfg.repairRepeatDays * DAY);
-    await ctx.db.setRepairNextCheck(r.id, next);
-    await ctx.tg.edit(chatId, messageId,
-      `${checkText(r).replace(/\n\nПочинили\?$/, "")}\n\n🛠 <b>Ещё не починили</b> — отметил(а) ${mention(call.from.id, name)}.\n` +
-        `Уточню снова через ${ctx.cfg.repairRepeatDays} дн.`);
-    await ctx.tg.answer(call.id, "Отмечено: ещё не починили.");
-    return;
-  }
-
   if (action === "fixed!") {
-    if (!(await ctx.db.closeRepair(r.id, "fixed", call.from.id, name, messageId))) {
-      await ctx.tg.answer(call.id, `Заявка №${r.id} уже закрыта.`, true);
+    // Итог — в первом сообщении бота; к нему же можно прислать фото после ремонта
+    if (!(await ctx.db.closeRepair(r.id, "fixed", call.from.id, name, r.bot_message_id))) {
+      await ctx.tg.answer(call.id, "По этой поломке уже есть ответ.", true);
       return;
     }
-    await ctx.tg.edit(chatId, messageId,
-      `✅ <b>Заявка №${r.id} — починили</b>\n` +
-        `«${esc(excerpt(r.text))}» — ${mention(r.user_id, r.user_name)}\n` +
-        `Отметил(а): ${mention(call.from.id, name)} · была открыта ${age(r.created_at)}\n\n` +
-        "📸 По желанию: пришлите фото после ремонта ответом на это сообщение.");
-    // У остальных сообщений заявки кнопки больше не нужны
-    for (const id of new Set([r.bot_message_id, r.check_message_id])) {
-      if (id && id !== messageId) {
-        await ctx.tg.safe("editMessageReplyMarkup", { chat_id: chatId, message_id: id, reply_markup: { inline_keyboard: [] } });
-      }
+    // Все напоминания по этой поломке больше не нужны
+    for (const id of new Set([...checkIds(r), messageId])) {
+      if (id && id !== r.bot_message_id) await ctx.tg.del(chatId, id);
     }
-    await ctx.tg.answer(call.id, `Заявка №${r.id} закрыта. Спасибо!`);
+    if (r.bot_message_id) {
+      await ctx.tg.edit(chatId, r.bot_message_id,
+        `✅ <b>Починили</b>\n${quote(r)}\n` +
+          `Отметил(а): ${mention(call.from.id, name)} · была открыта ${age(r.created_at)}\n\n` +
+          "📸 По желанию: пришлите фото после ремонта ответом на это сообщение.");
+    }
+    await ctx.tg.answer(call.id, "Отмечено: починили. Спасибо!");
     return;
   }
 
   if (action === "notbug!") {
     if (!(await ctx.db.closeRepair(r.id, "rejected", call.from.id, name, null))) {
-      await ctx.tg.answer(call.id, `Заявка №${r.id} уже закрыта.`, true);
+      await ctx.tg.answer(call.id, "По этой поломке уже есть ответ.", true);
       return;
     }
-    // Ложное срабатывание — убираем сообщения бота, чтобы не мешали
-    for (const id of new Set([r.bot_message_id, r.check_message_id, messageId])) {
+    // Ложное срабатывание — убираем все сообщения бота по ней
+    for (const id of new Set([r.bot_message_id, ...checkIds(r), messageId])) {
       if (id) await ctx.tg.del(chatId, id);
     }
     await ctx.tg.answer(call.id, "Понял, это не поломка.");
@@ -254,13 +247,13 @@ export async function handleRepairCommand(ctx, msg, cmd, args, admin) {
   if (cmd === "zayavki" || cmd === "repairs") {
     const open = await ctx.db.openRepairs(chatId);
     if (!open.length) {
-      await tg.reply(msg, "🎉 Открытых заявок нет.");
+      await tg.reply(msg, "🎉 Незакрытых поломок нет.");
       return true;
     }
-    const lines = [`🛠 <b>Открытые заявки (${open.length})</b>`];
+    const lines = [`🛠 <b>Незакрытые поломки (${open.length})</b>`];
     for (const r of open) {
-      lines.push(`• <a href="${messageLink(chatId, r.thread_id, r.message_id)}">№${r.id}</a> ` +
-        `«${esc(excerpt(r.text))}» — ${esc(r.user_name)}, открыта ${age(r.created_at)}`);
+      lines.push(`• <a href="${messageLink(chatId, r.thread_id, r.message_id)}">«${esc(excerpt(r.text))}»</a>` +
+        ` — ${esc(r.user_name)}, открыта ${age(r.created_at)}`);
     }
     await tg.reply(msg, lines.join("\n").slice(0, 4000));
     return true;
@@ -299,9 +292,10 @@ export async function checkRepairs(ctx) {
   for (const r of await ctx.db.dueRepairs(isoIn(0), CHECK_BATCH)) {
     // Следующая проверка — через 7 дней, если на эту не ответят
     await ctx.db.setRepairNextCheck(r.id, isoIn(repairRepeatDays * DAY));
-    if (r.check_message_id) {
+    // Кнопки остаются только на последнем напоминании
+    for (const id of checkIds(r)) {
       await ctx.tg.safe("editMessageReplyMarkup", {
-        chat_id: r.chat_id, message_id: r.check_message_id, reply_markup: { inline_keyboard: [] },
+        chat_id: r.chat_id, message_id: id, reply_markup: { inline_keyboard: [] },
       });
     }
     const sent = await sendWithButtons(ctx, r.chat_id, checkText(r),
