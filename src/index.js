@@ -33,8 +33,9 @@ function loadConfig(env) {
     photoTopic: parseTopicLink(env.PHOTO_TOPIC),
     repairTopic: parseTopicLink(env.REPAIR_TOPIC),
     repairSystemUrl: String(env.REPAIR_SYSTEM_URL || "").trim(),
-    repairFirstCheckHours: Number(env.REPAIR_FIRST_CHECK_HOURS || 48),
-    repairRepeatDays: Number(env.REPAIR_REPEAT_DAYS || 7),
+    // Через сколько часов каждое следующее напоминание; последнее значение повторяется
+    repairScheduleHours: String(env.REPAIR_SCHEDULE_HOURS || "4,24,72,168")
+      .split(",").map(Number).filter((h) => h > 0),
     photoRemindHours: Number(env.PHOTO_REMIND_HOURS || 7),
     photoRemindFrom: hhmm(env.PHOTO_REMIND_FROM || "09:00"),
     photoRemindTo: hhmm(env.PHOTO_REMIND_TO || "23:59"),

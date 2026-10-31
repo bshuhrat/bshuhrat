@@ -40,6 +40,12 @@ const isoIn = (ms) => new Date(Date.now() + ms).toISOString().slice(0, 19) + "Z"
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
+// Пауза перед напоминанием номер n (0 — первое): 4 ч, 24 ч, 72 ч, дальше каждые 7 дней
+function delayHours(ctx, n) {
+  const schedule = ctx.cfg.repairScheduleHours.length ? ctx.cfg.repairScheduleHours : [4, 24, 72, 168];
+  return schedule[Math.min(n, schedule.length - 1)];
+}
+
 export function isRepairTopic(ctx, chatId, threadId) {
   const t = ctx.cfg.repairTopic;
   return Boolean(t) && t.chatId === chatId && t.threadId === threadId;
@@ -83,7 +89,7 @@ function firstText(ctx, r) {
   return "🛠 <b>Нужна заявка</b>\n" +
     `Похоже на поломку («${esc(r.keyword)}»).\n` +
     `${mention(r.user_id, r.user_name)}, пожалуйста, <b>оформите заявку</b>.\n\n` +
-    `Через ${ctx.cfg.repairFirstCheckHours} ч я уточню, починили ли.`;
+    `Через ${delayHours(ctx, 0)} ч я уточню, починили ли.`;
 }
 // «Сделать заявку»: со ссылкой на систему (REPAIR_SYSTEM_URL) или с подсказкой, пока ссылки нет
 function firstKeyboard(ctx, id) {
@@ -149,7 +155,7 @@ export async function handleRepairMessage(ctx, msg) {
   const user = msg.from;
   const id = await ctx.db.createRepair({
     chatId, threadId, messageId: msg.message_id, userId: user.id, userName: fullName(user),
-    text, keyword, nextCheckAt: isoIn(ctx.cfg.repairFirstCheckHours * HOUR),
+    text, keyword, nextCheckAt: isoIn(delayHours(ctx, 0) * HOUR),
   });
   if (!id) return true; // это сообщение уже зарегистрировано
   const r = await ctx.db.getRepair(id);
@@ -285,13 +291,13 @@ export async function handleRepairCommand(ctx, msg, cmd, args, admin) {
 // ---------- планировщик: уточнение статуса ----------
 
 export async function checkRepairs(ctx) {
-  const { photoRemindFrom, photoRemindTo, timezone, repairRepeatDays } = ctx.cfg;
+  const { photoRemindFrom, photoRemindTo, timezone } = ctx.cfg;
   const now = localParts(new Date(), timezone).time;
   if (now < photoRemindFrom || now > photoRemindTo) return; // ночью не беспокоим
 
   for (const r of await ctx.db.dueRepairs(isoIn(0), CHECK_BATCH)) {
-    // Следующая проверка — через 7 дней, если на эту не ответят
-    await ctx.db.setRepairNextCheck(r.id, isoIn(repairRepeatDays * DAY));
+    // Следующее напоминание — по графику, если на это не ответят
+    await ctx.db.setRepairNextCheck(r.id, isoIn(delayHours(ctx, r.checks + 1) * HOUR));
     // Кнопки остаются только на последнем напоминании
     for (const id of checkIds(r)) {
       await ctx.tg.safe("editMessageReplyMarkup", {

@@ -486,7 +486,7 @@ test("поломки: просьба оформить заявку и уточн
   assert.equal(visible(cs).length, 0);
   cs = await during(() => msg(ALI, "Печь не греет уже час", T));
   const first = one(cs, "sendMessage");
-  assert.match(first.params.text, /Нужна заявка[\s\S]*не греет[\s\S]*оформите заявку[\s\S]*48 ч/);
+  assert.match(first.params.text, /Нужна заявка[\s\S]*не греет[\s\S]*оформите заявку[\s\S]*через 4 ч/i);
   assert.ok(noNumbers(cs), "без номеров заявок");
   assert.equal(first.params.message_thread_id, 91);
   // в первом сообщении — только «Сделать заявку»
@@ -496,6 +496,8 @@ test("поломки: просьба оформить заявку и уточн
   assert.equal(firstKb[0][0].text, "📝 Сделать заявку");
   const r1 = await DB.prepare("SELECT * FROM repairs WHERE id = 1").first();
   assert.equal(first.params.reply_parameters.message_id, r1.message_id);
+  const hoursUntil = (iso) => (Date.parse(iso) - Date.now()) / 3_600_000;
+  assert.ok(Math.abs(hoursUntil(r1.next_check_at) - 4) < 0.1, "первое напоминание через 4 ч");
   const firstMsg = { message_id: r1.bot_message_id, date: 0, chat: G, text: "x" };
   cs = await during(() => press(SAMI, firstKb[0][0].callback_data, firstMsg));
   assert.match(one(cs, "answerCallbackQuery").params.text, /Ссылка на систему заявок скоро появится/);
@@ -525,19 +527,25 @@ test("поломки: просьба оформить заявку и уточн
   assert.deepEqual(check.params.reply_markup.inline_keyboard[0].map((b) => b.text), ["✅ Починили", "❌ Не поломка"]);
   let r = await DB.prepare("SELECT * FROM repairs WHERE id = 1").first();
   assert.equal(r.checks, 1);
-  const days = (Date.parse(r.next_check_at) - Date.now()) / 86_400_000;
-  assert.ok(days > 6.9 && days < 7.1, "следующая проверка через 7 дней");
+  assert.ok(Math.abs(hoursUntil(r.next_check_at) - 24) < 0.1, "второе — через 24 ч");
   cs = await during(runCron);
   assert.equal(texts(cs).filter((t) => /Какой статус/.test(t)).length, 0);
 
-  // без ответа — ещё одно напоминание через 7 дней
+  // без ответа — следующие напоминания по графику
   sqlite.prepare("UPDATE repairs SET next_check_at = '2020-01-01T00:00:00Z' WHERE id = 1").run();
   cs = await during(runCron);
   assert.ok(texts(cs).some((t) => /Какой статус/.test(t)));
   r = await DB.prepare("SELECT * FROM repairs WHERE id = 1").first();
+  assert.ok(Math.abs(hoursUntil(r.next_check_at) - 72) < 0.1, "третье — через 72 ч");
+  for (const expected of [168, 168]) {
+    sqlite.prepare("UPDATE repairs SET next_check_at = '2020-01-01T00:00:00Z' WHERE id = 1").run();
+    await runCron();
+    r = await DB.prepare("SELECT * FROM repairs WHERE id = 1").first();
+    assert.ok(Math.abs(hoursUntil(r.next_check_at) - expected) < 0.1, "дальше — каждые 7 дней");
+  }
   const reminders = JSON.parse(r.check_message_ids);
-  assert.equal(reminders.length, 2);
-  const checkMsg = { message_id: reminders[1], date: 0, chat: G, text: "x" };
+  assert.equal(reminders.length, 4);
+  const checkMsg = { message_id: reminders.at(-1), date: 0, chat: G, text: "x" };
 
   // подтверждение: нажал Сами — подтвердить может только он
   cs = await during(() => press(SAMI, "rp:1:fixed", checkMsg));
