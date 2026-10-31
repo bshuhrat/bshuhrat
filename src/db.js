@@ -447,6 +447,13 @@ export class Database {
     return this.run("UPDATE photo_fixes SET reminded = 1 WHERE id = ?", fixId);
   }
 
+  // Админ удалил сообщение бота — фото снимается с контроля
+  cancelPhotoFix(fixId) {
+    return this.run(
+      "UPDATE photo_fixes SET status = 'cancelled' WHERE id = ? AND status IN ('open', 'claimed')", fixId,
+    );
+  }
+
   donePhotoFixes() {
     return this.all("SELECT * FROM photo_fixes WHERE status = 'done'");
   }

@@ -126,7 +126,8 @@ export async function fullReport(ctx) {
 
   if (repairs.length) {
     const n = (st) => repairs.filter((r) => r.status === st).length;
-    lines.push("", `🛠 <b>Поломки</b>: открыто ${n("open")} · починили ${n("fixed")} · не поломка ${n("rejected")}`);
+    lines.push("", `🛠 <b>Поломки</b>: открыто ${n("open")} · починили ${n("fixed")} · не поломка ${n("rejected")}` +
+      (n("cancelled") ? ` · снято админом ${n("cancelled")}` : ""));
   }
 
   if (tasks.length) {

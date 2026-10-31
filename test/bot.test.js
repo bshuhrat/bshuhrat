@@ -28,13 +28,16 @@ const DB = {
 
 // --- имитация Telegram Bot API ---
 const calls = [];
-const tgState = { webhook: "", queue: [] };
+const tgState = { webhook: "", queue: [], deleted: new Set() }; // deleted — удалённые админом сообщения
 let nextId = 5000;
 globalThis.fetch = async (url, init) => {
   if (url.includes("/file/bot")) return new Response(new Uint8Array([1, 2, 3, url.length]));
   const method = url.split("/").pop();
   const params = init.body instanceof FormData ? Object.fromEntries(init.body) : JSON.parse(init.body);
   calls.push({ method, params });
+  if (method.startsWith("editMessage") && tgState.deleted.has(Number(params.message_id))) {
+    return new Response(JSON.stringify({ ok: false, description: "Bad Request: message to edit not found" }));
+  }
   let result = true;
   if (method === "setWebhook") tgState.webhook = params.url;
   else if (method === "getWebhookInfo") result = { url: tgState.webhook, pending_update_count: 0 };
@@ -612,6 +615,69 @@ test("поломки: просьба оформить заявку и уточн
   cs = await during(() => msg(ALI, "печь не греет", { thread: 5 }));
   assert.equal(texts(cs).filter((t) => /Нужна заявка/.test(t)).length, 0);
 
+  delete env.REPAIR_TOPIC;
+  delete env.PHOTO_REMIND_FROM;
+  delete env.PHOTO_REMIND_TO;
+});
+
+test("админ удалил сообщение бота — бот больше не напоминает (во всех темах)", async () => {
+  tgState.webhook = "https://bot.example.workers.dev/webhook";
+  env.REPAIR_TOPIC = "https://t.me/c/1/91";
+  env.PHOTO_REMIND_FROM = "00:00";
+  env.PHOTO_REMIND_TO = "23:59";
+  const past = "2020-01-01T00:00:00Z";
+  const sends = (cs) => cs.filter((c) => /^send/.test(c.method));
+
+  // поломка: удалено первое сообщение бота
+  await msg(ALI, "Холодильник не охлаждает", { thread: 91 });
+  let r = await DB.prepare("SELECT * FROM repairs ORDER BY id DESC LIMIT 1").first();
+  tgState.deleted.add(r.bot_message_id);
+  sqlite.prepare("UPDATE repairs SET next_check_at = ? WHERE id = ?").run(past, r.id);
+  let cs = await during(runCron);
+  assert.equal(sends(cs).filter((c) => /Холодильник/.test(c.params.text || "")).length, 0);
+  assert.equal((await DB.prepare("SELECT status FROM repairs WHERE id = ?").bind(r.id).first()).status, "cancelled");
+
+  // поломка: удалено напоминание
+  await msg(ALI, "Касса не печатает чеки", { thread: 91 });
+  r = await DB.prepare("SELECT * FROM repairs ORDER BY id DESC LIMIT 1").first();
+  sqlite.prepare("UPDATE repairs SET next_check_at = ? WHERE id = ?").run(past, r.id);
+  await runCron();
+  r = await DB.prepare("SELECT * FROM repairs WHERE id = ?").bind(r.id).first();
+  tgState.deleted.add(r.check_message_id);
+  sqlite.prepare("UPDATE repairs SET next_check_at = ? WHERE id = ?").run(past, r.id);
+  cs = await during(runCron);
+  assert.equal(sends(cs).filter((c) => /Касса/.test(c.params.text || "")).length, 0);
+  assert.equal((await DB.prepare("SELECT status FROM repairs WHERE id = ?").bind(r.id).first()).status, "cancelled");
+  assert.ok(cs.some((c) => c.method === "deleteMessage" && c.params.message_id === r.bot_message_id),
+    "остальные сообщения бота по ней убраны");
+
+  // поломка без удалений — напоминание приходит как обычно
+  await msg(ALI, "Печь не греет снова", { thread: 91 });
+  r = await DB.prepare("SELECT * FROM repairs ORDER BY id DESC LIMIT 1").first();
+  sqlite.prepare("UPDATE repairs SET next_check_at = ? WHERE id = ?").run(past, r.id);
+  cs = await during(runCron);
+  assert.ok(sends(cs).some((c) => /Печь не греет снова/.test(c.params.text || "")));
+
+  // фото-исправление: удалено сообщение с кнопкой — напоминания «Нужно исправить» нет
+  await photo(ALI, "грязный стол");
+  const fix = await DB.prepare("SELECT * FROM photo_fixes ORDER BY id DESC LIMIT 1").first();
+  tgState.deleted.add(fix.button_message_id);
+  sqlite.prepare("UPDATE photo_fixes SET created_at = ? WHERE id = ?").run(past, fix.id);
+  cs = await during(runCron);
+  assert.equal(texts(cs).filter((t) => /Нужно исправить/.test(t)).length, 0);
+  assert.equal((await DB.prepare("SELECT status FROM photo_fixes WHERE id = ?").bind(fix.id).first()).status, "cancelled");
+
+  // задание: удалено сообщение с заданием — ни напоминания, ни дедлайна
+  await msg(ADM, "/task Уборка | Протереть столы | 30.10.2099 18:00", { thread: 5 });
+  const task = await DB.prepare("SELECT * FROM tasks ORDER BY id DESC LIMIT 1").first();
+  tgState.deleted.add(task.message_id);
+  sqlite.prepare("UPDATE tasks SET deadline = ? WHERE id = ?").run(past, task.id);
+  cs = await during(runCron);
+  assert.equal(sends(cs).filter((c) => /Уборка/.test(c.params.text || "")).length, 0);
+  const t = await DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(task.id).first();
+  assert.equal(t.closed, 1);
+
+  tgState.deleted.clear();
   delete env.REPAIR_TOPIC;
   delete env.PHOTO_REMIND_FROM;
   delete env.PHOTO_REMIND_TO;

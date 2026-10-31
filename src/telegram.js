@@ -73,6 +73,18 @@ export class Telegram {
     return this.safe("answerCallbackQuery", { callback_query_id: callbackId, text, show_alert: alert });
   }
 
+  // Удалено ли сообщение (Telegram не присылает ботам событий об удалении).
+  // Проверка — правка кнопок на те же самые: «не найдено» значит удалено.
+  // Любая другая ошибка считается «сообщение на месте», чтобы не потерять напоминание.
+  async messageGone(chatId, messageId, markup = { inline_keyboard: [] }) {
+    try {
+      await this.call("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: markup });
+      return false;
+    } catch (e) {
+      return /message to edit not found|message_id_invalid|message not found/i.test(String(e));
+    }
+  }
+
   del(chatId, messageId) {
     return this.safe("deleteMessage", { chat_id: chatId, message_id: messageId });
   }

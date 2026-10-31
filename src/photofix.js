@@ -193,8 +193,13 @@ async function finishFix(ctx, msg, fix) {
 // Если взявшийся не прислал фото вовремя — возвращаем кнопку всем
 export async function releaseExpired(ctx) {
   for (const fix of await ctx.db.expiredPhotoFixes(isoMinus(ctx.cfg.photoFixTimeoutMin * 60_000))) {
-    await ctx.db.releasePhotoFix(fix.id);
     if (fix.prompt_message_id) await ctx.tg.del(fix.chat_id, fix.prompt_message_id);
+    // Админ удалил сообщение бота — фото снято с контроля
+    if (fix.button_message_id && await ctx.tg.messageGone(fix.chat_id, fix.button_message_id)) {
+      await ctx.db.cancelPhotoFix(fix.id);
+      continue;
+    }
+    await ctx.db.releasePhotoFix(fix.id);
     if (!fix.button_message_id) continue;
     await withButtonFallback((markup) => editFixMessage(ctx, fix,
       `${openText(fix)}\n\n⌛ ${esc(fix.fixer_name)} не прислал(а) исправление — кнопка снова доступна.`,
@@ -210,6 +215,12 @@ export async function remindUnfixed(ctx) {
 
   for (const fix of await ctx.db.unfixedPhotos(isoMinus(photoRemindHours * 3_600_000), REMIND_BATCH)) {
     await ctx.db.markFixReminded(fix.id);
+    // Админ удалил сообщение бота с кнопкой — больше не напоминаем
+    if (fix.button_message_id &&
+      await ctx.tg.messageGone(fix.chat_id, fix.button_message_id, photoFixKeyboard(fix.id))) {
+      await ctx.db.cancelPhotoFix(fix.id);
+      continue;
+    }
     // Старую кнопку убираем, новую ставим под напоминанием — чтобы была на виду
     if (fix.button_message_id === fix.orig_message_id) {
       await editFixMessage(ctx, fix, openText(fix)); // само фото не удаляем — только кнопку

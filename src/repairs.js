@@ -296,14 +296,20 @@ export async function checkRepairs(ctx) {
   if (now < photoRemindFrom || now > photoRemindTo) return; // ночью не беспокоим
 
   for (const r of await ctx.db.dueRepairs(isoIn(0), CHECK_BATCH)) {
+    // Админ удалил сообщение бота по этой поломке — больше о ней не пишем.
+    // Заодно кнопки остаются только на последнем напоминании.
+    let gone = Boolean(r.bot_message_id) &&
+      await ctx.tg.messageGone(r.chat_id, r.bot_message_id, firstKeyboard(ctx, r.id));
+    for (const id of checkIds(r)) {
+      if (await ctx.tg.messageGone(r.chat_id, id)) gone = true;
+    }
+    if (gone) {
+      await ctx.db.closeRepair(r.id, "cancelled", null, null, null);
+      for (const id of [r.bot_message_id, ...checkIds(r)]) if (id) await ctx.tg.del(r.chat_id, id);
+      continue;
+    }
     // Следующее напоминание — по графику, если на это не ответят
     await ctx.db.setRepairNextCheck(r.id, isoIn(delayHours(ctx, r.checks + 1) * HOUR));
-    // Кнопки остаются только на последнем напоминании
-    for (const id of checkIds(r)) {
-      await ctx.tg.safe("editMessageReplyMarkup", {
-        chat_id: r.chat_id, message_id: id, reply_markup: { inline_keyboard: [] },
-      });
-    }
     const sent = await sendWithButtons(ctx, r.chat_id, checkText(r),
       { thread: r.thread_id, replyTo: r.message_id }, checkKeyboard(r.id));
     if (sent) await ctx.db.setRepairCheckMessage(r.id, sent.message_id);

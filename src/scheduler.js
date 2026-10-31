@@ -1,6 +1,7 @@
 // Запускается Cloudflare каждую минуту: дедлайны, ежедневный отчёт, фото-исправления.
 import { releaseExpired, remindUnfixed } from "./photofix.js";
 import { checkRepairs } from "./repairs.js";
+import { taskKeyboard } from "./keyboards.js";
 import { notifyAdmins } from "./services.js";
 import { fullReport, participants, taskSummary } from "./stats.js";
 import { esc, fmtDt, localParts, mention } from "./utils.js";
@@ -16,6 +17,15 @@ async function checkDeadlines(ctx) {
   for (const task of await ctx.db.tasksWithDeadline()) {
     const deadline = Date.parse(task.deadline);
     const opts = { thread: task.thread_id, replyTo: task.message_id };
+    const due = now >= deadline ||
+      (task.reminded === 0 && now >= deadline - ctx.cfg.remindBeforeHours * 3_600_000);
+    // Админ удалил сообщение с заданием — снимаем его, больше не пишем
+    if (due && task.message_id &&
+      await ctx.tg.messageGone(task.chat_id, task.message_id, taskKeyboard(task.id))) {
+      await ctx.db.closeTask(task.id);
+      await ctx.db.setReminded(task.id, 2);
+      continue;
+    }
 
     if (now >= deadline) {
       await ctx.db.setReminded(task.id, 2);
