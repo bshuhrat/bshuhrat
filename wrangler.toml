@@ -19,6 +19,10 @@ database_name = "telegram-tasks-bot"
 [images]
 binding = "IMAGES"
 
+# Workers AI — бесплатный дневной лимит; модель Kimi разбирает фото отчётов
+[ai]
+binding = "AI"
+
 # Планировщик: каждую минуту проверяет дедлайны, отчёт и фото-исправления
 [triggers]
 crons = ["* * * * *"]

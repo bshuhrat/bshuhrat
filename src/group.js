@@ -1,5 +1,6 @@
 // Обработчики в групповом чате: темы, автоответы, задания, сдачи, запросы, фото.
 import { handleAdminReturn, handlePhoto, onFixButton, onReturnButton } from "./photofix.js";
+import { handleReportMessage } from "./reports.js";
 import { handleRepairCommand, handleRepairMessage, onRepairButton } from "./repairs.js";
 import { acceptSubmission, closeTask, publishTask, registerRequest } from "./services.js";
 import { taskSummary } from "./stats.js";
@@ -19,7 +20,8 @@ const HELP_MEMBER = `🤖 <b>Команды бота</b>
 /my — моя статистика
 Сдать задание — ответьте (reply) на сообщение с заданием или напишите <code>#сдаю</code> в теме с одним открытым заданием.
 В теме фото-исправлений нажмите «📷 Отправить фото исправление» под фото и пришлите исправленное фото.
-В теме поломок: /zayavki — открытые заявки, /kw — слова, на которые реагирует бот.`;
+В теме поломок: /zayavki — открытые заявки, /kw — слова, на которые реагирует бот.
+Разбор отчёта ИИ: ответьте на фото или скриншот отчёта словом <code>разбор</code>. /normy — нормы, с которыми сравнивает ИИ.`;
 
 const HELP_ADMIN = `
 
@@ -33,6 +35,7 @@ const HELP_ADMIN = `
 /photo_topic — сделать текущую тему темой фото-исправлений (<code>/photo_topic off</code> — выключить)
 Не согласны с фото-исправлением — ответьте (reply) на альбом словом <code>вернуть</code> (можно с причиной: <code>вернуть плохо видно</code>). Бот удалит ваше сообщение и вернёт фото в работу
 В теме поломок: <code>/kw_add слово</code> / <code>/kw_del слово</code> — слова, на которые бот реагирует
+<code>/normy_set доставка до 30 мин; списания до 2%</code> — нормы для разбора отчётов ИИ
 /close <i>id</i> — закрыть задание и получить итог
 /stat <i>id</i> — итог по заданию (придёт в личку)`;
 
@@ -71,6 +74,8 @@ export async function handleGroupMessage(ctx, msg) {
 
   // Админ ответил на альбом с исправлением словом «вернуть»
   if (await handleAdminReturn(ctx, msg)) return;
+  // Разбор отчёта ИИ: «разбор» в ответ на фото, фото в теме отчётов, команды норм
+  if (await handleReportMessage(ctx, msg)) return;
 
   const command = parseCommand(msg, cfg.botUsername);
   if (command) {

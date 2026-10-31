@@ -2,6 +2,7 @@
 import { handleAdminCallback, handlePrivateMessage } from "./admin.js";
 import { Database } from "./db.js";
 import { handleGroupCallback, handleGroupMessage } from "./group.js";
+import { DEFAULT_AI_MODEL } from "./reports.js";
 import { runScheduled } from "./scheduler.js";
 import { Telegram } from "./telegram.js";
 import { parseTopicLink } from "./utils.js";
@@ -31,6 +32,8 @@ function loadConfig(env) {
     remindBeforeHours: Number(env.REMIND_BEFORE_HOURS || 24),
     photoFixTimeoutMin: Number(env.PHOTO_FIX_TIMEOUT_MIN || 60),
     photoTopic: parseTopicLink(env.PHOTO_TOPIC),
+    reportTopic: parseTopicLink(env.REPORT_TOPIC),
+    aiModel: String(env.AI_MODEL || DEFAULT_AI_MODEL).trim(),
     repairTopic: parseTopicLink(env.REPAIR_TOPIC),
     repairSystemUrl: String(env.REPAIR_SYSTEM_URL || "").trim(),
     // Через сколько часов каждое следующее напоминание; последнее значение повторяется
@@ -47,7 +50,7 @@ async function makeContext(env) {
   const db = new Database(env.DB);
   await db.init();
   if (!botUsername) botUsername = await db.getSetting("bot_username");
-  return { db, tg: new Telegram(tokenOf(env)), cfg: loadConfig(env), images: env.IMAGES };
+  return { db, tg: new Telegram(tokenOf(env)), cfg: loadConfig(env), images: env.IMAGES, ai: env.AI };
 }
 
 // Секрет вебхука выводится из токена — отдельная настройка не нужна

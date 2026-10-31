@@ -51,6 +51,13 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS repair_keywords (
     chat_id INTEGER NOT NULL, keyword TEXT NOT NULL, enabled INTEGER NOT NULL,
     PRIMARY KEY (chat_id, keyword))`,
+  // Очередь разбора отчётов ИИ
+  `CREATE TABLE IF NOT EXISTS report_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
+    source_message_id INTEGER NOT NULL, file_id TEXT NOT NULL, caption TEXT,
+    requested_by TEXT, requested_by_id INTEGER, placeholder_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending | done | failed
+    attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
   // Состояние диалога с админом (ждём комментарий / ответ)
   `CREATE TABLE IF NOT EXISTS states (
     user_id INTEGER PRIMARY KEY, state TEXT NOT NULL, data TEXT)`,
@@ -540,6 +547,27 @@ export class Database {
        ON CONFLICT (chat_id, keyword) DO UPDATE SET enabled = excluded.enabled`,
       chatId, keyword, enabled ? 1 : 0,
     );
+  }
+
+  // ---------- разбор отчётов ----------
+  createReportJob({ chatId, threadId, sourceMessageId, fileId, caption, requestedBy, requestedById, placeholderId }) {
+    return this.run(
+      `INSERT INTO report_jobs (chat_id, thread_id, source_message_id, file_id, caption, requested_by,
+       requested_by_id, placeholder_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      chatId, threadId, sourceMessageId, fileId, caption, requestedBy, requestedById, placeholderId, nowIso(),
+    );
+  }
+
+  pendingReportJobs(limit) {
+    return this.all("SELECT * FROM report_jobs WHERE status = 'pending' ORDER BY id LIMIT ?", limit);
+  }
+
+  bumpReportJob(id) {
+    return this.run("UPDATE report_jobs SET attempts = attempts + 1 WHERE id = ?", id);
+  }
+
+  finishReportJob(id, status) {
+    return this.run("UPDATE report_jobs SET status = ? WHERE id = ?", status, id);
   }
 
   // ---------- состояние диалога ----------

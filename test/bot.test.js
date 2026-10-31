@@ -682,3 +682,69 @@ test("админ удалил сообщение бота — бот больш�
   delete env.PHOTO_REMIND_FROM;
   delete env.PHOTO_REMIND_TO;
 });
+
+test("разбор отчёта ИИ: «разбор» в ответ на фото, нормы, фоновая обработка", async () => {
+  tgState.webhook = "https://bot.example.workers.dev/webhook";
+  const aiCalls = [];
+  let aiReply = { choices: [{ message: { content: "<think>считаю</think>📊 Что в отчёте: выручка за неделю\n\n✅ Молодцы:\n— **средний чек** 1250 ₽\n\n⚠️ Улучшить:\n— доставка 38 мин (норма 30)" } }] };
+  env.AI = { run: async (model, input) => { aiCalls.push({ model, input }); if (aiReply instanceof Error) throw aiReply; return aiReply; } };
+  const T = { thread: 5 };
+
+  // нормы задаёт только админ
+  let cs = await during(() => msg(ALI, "/normy_set всё отлично", T));
+  assert.equal(texts(cs).length, 0);
+  await msg(ADM, "/normy_set доставка до 30 мин; списания до 2%", T);
+  cs = await during(() => msg(SAMI, "/normy", T));
+  assert.match(texts(cs)[0], /доставка до 30 мин/);
+
+  // «разбор» в ответ на фото
+  const report = await photo(ALI, "отчёт за неделю", { thread: 5 });
+  cs = await during(() => msg(SAMI, "разбор", { ...T, reply: report }));
+  const placeholder = one(cs, "sendMessage");
+  assert.match(placeholder.params.text, /Разбираю отчёт/);
+  assert.equal(placeholder.params.reply_parameters.message_id, report.message_id);
+  assert.equal(aiCalls.length, 0, "ИИ вызывается в фоне, не в вебхуке");
+
+  // «разбор» не на фото — подсказка
+  cs = await during(() => msg(SAMI, "разбор", { ...T, reply: { message_id: 1, date: 0, chat: G, text: "просто текст" } }));
+  assert.match(texts(cs)[0], /на фото или скриншот/);
+
+  // планировщик: ИИ получает картинку и нормы, ответ встаёт на место «Разбираю…»
+  cs = await during(runCron);
+  assert.equal(aiCalls.length, 1);
+  assert.equal(aiCalls[0].model, "@cf/moonshotai/kimi-k2.6");
+  const userMsg = aiCalls[0].input.messages[1];
+  assert.match(userMsg.content[0].text, /Нормы: доставка до 30 мин; списания до 2%[\s\S]*отчёт за неделю/);
+  assert.match(userMsg.content[1].image_url.url, /^data:image\/jpeg;base64,/);
+  const result = cs.find((c) => c.method === "editMessageText" && c.params.message_id === placeholder.params.message_id);
+  assert.match(result.params.text, /Разбор отчёта[\s\S]*Sami[\s\S]*Молодцы[\s\S]*средний чек 1250[\s\S]*Улучшить/);
+  assert.doesNotMatch(result.params.text, /считаю|\*\*/, "без рассуждений и Markdown");
+  cs = await during(runCron);
+  assert.equal(aiCalls.length, 1, "каждый отчёт разбирается один раз");
+
+  // ошибка ИИ (лимит) — после двух попыток понятное сообщение
+  aiReply = new Error("AiError: 4006: you have used up your daily free allocation of neurons");
+  const report2 = await photo(ALI, null, { thread: 5 });
+  await msg(ALI, "/razbor", { ...T, reply: report2 });
+  await runCron();
+  cs = await during(runCron);
+  assert.ok(cs.some((c) => c.method === "editMessageText" && /дневной лимит ИИ закончился/.test(c.params.text)));
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => c.method === "editMessageText" && /лимит/.test(c.params.text || "")).length, 0);
+
+  // в теме отчётов фото разбирается без слова «разбор»
+  aiReply = { response: "📊 Что в отчёте: касса" };
+  env.REPORT_TOPIC = "https://t.me/c/1/95";
+  cs = await during(() => photo(ALI, null, { thread: 95 }));
+  assert.match(one(cs, "sendMessage").params.text, /Разбираю отчёт/);
+  cs = await during(() => photo(ALI, null, { thread: 5 }));
+  assert.equal(cs.filter((c) => /Разбираю/.test(c.params.text || "")).length, 0, "в других темах — только по слову «разбор»");
+  cs = await during(runCron);
+  assert.ok(cs.some((c) => c.method === "editMessageText" && /Что в отчёте: касса/.test(c.params.text)));
+
+  // без привязки ИИ — честное сообщение
+  delete env.AI;
+  cs = await during(() => msg(SAMI, "разбор", { ...T, reply: report }));
+  assert.match(texts(cs)[0], /не подключён/);
+  delete env.REPORT_TOPIC;
+});
