@@ -4,8 +4,8 @@
 import { esc, fullName, mention, parseCommand, threadOf } from "./utils.js";
 
 export const DEFAULT_AI_MODEL = "@cf/moonshotai/kimi-k2.6";
-// Если основная модель не ответила — пробуем запасные (тоже бесплатные, с поддержкой картинок)
-const FALLBACK_MODELS = ["@cf/moonshotai/kimi-k2.5", "@cf/meta/llama-4-scout-17b-16e-instruct"];
+// Другие бесплатные модели Workers AI с поддержкой картинок — участвуют в выборе лучшего ответа
+const FALLBACK_MODELS = ["@cf/meta/llama-4-scout-17b-16e-instruct"];
 const MODEL_NAMES = {
   "@cf/moonshotai/kimi-k2.6": "Kimi K2.6",
   "@cf/moonshotai/kimi-k2.5": "Kimi K2.5",
@@ -147,8 +147,8 @@ export async function handleReportMessage(ctx, msg) {
     await ctx.tg.reply(msg, "Картинка слишком большая — пришлите скриншот поменьше.");
     return true;
   }
-  if (!ctx.ai) {
-    await ctx.tg.reply(msg, "ИИ для разбора отчётов не подключён (нет привязки AI в Cloudflare).");
+  if (!ctx.ai && !ctx.cfg.geminiKey) {
+    await ctx.tg.reply(msg, "ИИ для разбора отчётов не подключён (нет привязки AI в Cloudflare и ключа Gemini).");
     return true;
   }
   const placeholder = await ctx.tg.send(chatId, "⏳ Разбираю отчёт… Обычно это занимает 1–2 минуты.", {
@@ -190,9 +190,96 @@ function cleanup(text) {
   return t.replace(/\*\*|__|^#+\s*/gm, "").trim();
 }
 
+// ---------- модели ----------
+
+// Один «участник»: { name, run(prompt, system, image) -> текст }
+function workersModel(ctx, model) {
+  return {
+    name: modelName(model),
+    async run(system, prompt, image, maxTokens = 4096) {
+      const result = await ctx.ai.run(model, {
+        messages: [
+          { role: "system", content: system },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: prompt },
+              { type: "image_url", image_url: { url: `data:${image.mime};base64,${image.b64}` } },
+            ],
+          },
+        ],
+        max_tokens: maxTokens, // с запасом: модели могут сначала рассуждать
+      });
+      return cleanup(aiText(result));
+    },
+  };
+}
+
+// Google Gemini (бесплатный тариф, ключ GEMINI_API_KEY из Google AI Studio)
+function geminiModel(ctx) {
+  const model = ctx.cfg.geminiModel;
+  return {
+    name: "Gemini",
+    async run(system, prompt, image, maxTokens = 8192) {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": ctx.cfg.geminiKey },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: system }] },
+          contents: [{ role: "user", parts: [{ text: prompt }, { inline_data: { mime_type: image.mime, data: image.b64 } }] }],
+          generationConfig: { maxOutputTokens: maxTokens },
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${data?.error?.message || ""}`);
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      return cleanup(parts.filter((p) => !p.thought).map((p) => p.text || "").join(""));
+    },
+  };
+}
+
+// Участники соревнования: Gemini (если есть ключ) и модели Workers AI
+function contestants(ctx) {
+  const list = [];
+  if (ctx.cfg.geminiKey) list.push(geminiModel(ctx));
+  if (ctx.ai) {
+    for (const m of [...new Set([ctx.cfg.aiModel, ...FALLBACK_MODELS])]) list.push(workersModel(ctx, m));
+  }
+  return list;
+}
+
+const JUDGE_PROMPT = `Ты проверяешь разборы операционного отчёта пиццерии Додо. Перед тобой изображение отчёта и несколько разборов, помеченных буквами.
+Выбери ОДИН лучший разбор по правилам:
+1) Числа нужной точки совпадают с отчётом на изображении (это главное: разбор с неверными числами — плохой).
+2) Причины связаны с показателями, а не общие слова.
+3) Действия конкретные, для менеджера пиццерии, со сроками; нет слов «проанализировать», «оптимизировать», «улучшить».
+4) Коротко и по делу.
+Ответь только JSON без пояснений вокруг: {"best": "<буква>", "why": "<одна короткая фраза по-русски>"}`;
+
+// Судья выбирает лучший ответ; если судья не справился — берём первый
+async function pickBest(judges, answers, image, location) {
+  const letters = "ABCDEFGH";
+  const prompt = `Точка: ${location || "вся сеть"}.\n\n` +
+    answers.map((a, i) => `=== Разбор ${letters[i]} ===\n${a.text}`).join("\n\n");
+  for (const judge of judges) {
+    try {
+      const reply = await judge.run(JUDGE_PROMPT, prompt, image, 2048);
+      const m = reply.match(/"best"\s*:\s*"([A-H])"/) || reply.match(/\b([A-H])\b/);
+      const index = m ? letters.indexOf(m[1]) : -1;
+      if (index >= 0 && index < answers.length) {
+        const why = (reply.match(/"why"\s*:\s*"([^"]*)"/) || [])[1] || "";
+        return { ...answers[index], why, judge: judge.name };
+      }
+    } catch (e) {
+      console.warn(`Судья ${judge.name} не ответил:`, String(e));
+    }
+  }
+  return { ...answers[0], why: "", judge: "" };
+}
+
 async function analyze(ctx, job) {
   const bytes = await ctx.tg.download(job.file_id);
-  const mime = bytes[0] === 0x89 ? "image/png" : "image/jpeg";
+  const image = { mime: bytes[0] === 0x89 ? "image/png" : "image/jpeg", b64: toBase64(bytes) };
   const norms = await ctx.db.getSetting(normsKey(job.chat_id));
   let prompt = job.location
     ? `Разбери точку: ${job.location}. Остальные точки используй только для сравнения.`
@@ -200,47 +287,38 @@ async function analyze(ctx, job) {
   if (norms) prompt += `\nНормы: ${norms}`;
   if (job.caption) prompt += `\nКомментарий к фото: ${job.caption}`;
 
-  const input = {
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: prompt },
-          { type: "image_url", image_url: { url: `data:${mime};base64,${toBase64(bytes)}` } },
-        ],
-      },
-    ],
-    max_tokens: 4096, // с запасом: Kimi может сначала рассуждать
-  };
-
-  // Пробуем модели по очереди; ошибки собираем, чтобы показать причину
+  // Все модели отвечают параллельно; ошибки собираем, чтобы показать причину
+  const models = contestants(ctx);
+  const results = await Promise.allSettled(models.map((m) => m.run(SYSTEM_PROMPT, prompt, image)));
+  const answers = [];
   const errors = [];
-  for (const model of [...new Set([ctx.cfg.aiModel, ...FALLBACK_MODELS])]) {
-    try {
-      const text = cleanup(aiText(await ctx.ai.run(model, input)));
-      if (text) return { text, model, errors };
-      errors.push(`${modelName(model)}: пустой ответ`);
-    } catch (e) {
-      errors.push(`${modelName(model)}: ${String(e?.message || e).slice(0, 160)}`);
-    }
-  }
-  throw new Error(errors.join("; "));
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled" && r.value) answers.push({ text: r.value, name: models[i].name });
+    else errors.push(`${models[i].name}: ${r.status === "fulfilled" ? "пустой ответ" : String(r.reason?.message || r.reason).slice(0, 160)}`);
+  });
+  if (!answers.length) throw new Error(errors.join("; "));
+  if (answers.length === 1) return { ...answers[0], why: "", judge: "", total: 1, errors };
+
+  // Судья — самая сильная из ответивших моделей (порядок участников: Gemini, Kimi, Llama)
+  const judges = models.filter((m) => answers.some((a) => a.name === m.name));
+  return { ...(await pickBest(judges, answers, image, job.location)), total: answers.length, errors };
 }
 
 export async function processReportJobs(ctx) {
-  if (!ctx.ai) return;
+  if (!ctx.ai && !ctx.cfg.geminiKey) return;
   for (const job of await ctx.db.pendingReportJobs(JOBS_PER_RUN)) {
     // Помечаем заранее: если обработка упадёт посреди, задача не зациклится
     await ctx.db.bumpReportJob(job.id);
     try {
-      const { text, model, errors } = await analyze(ctx, job);
+      const best = await analyze(ctx, job);
       const where = job.location ? `: ${esc(job.location)}` : " по сети";
-      const header = `🤖 <b>Разбор отчёта${where}</b> (запросил(а) ${mention(job.requested_by_id, job.requested_by)}, ` +
-        `${esc(modelName(model))})\n\n`;
-      // Ответила запасная модель — покажем, почему не ответила основная
-      const note = errors.length ? `\n\n<i>⚠️ ${esc(errors.join("; ").slice(0, 400))}</i>` : "";
-      await ctx.tg.edit(job.chat_id, job.placeholder_id, (header + esc(text)).slice(0, 3900) + note);
+      const who = best.total > 1 ? `лучший из ${best.total}: ${esc(best.name)}` : esc(best.name);
+      const header = `🤖 <b>Разбор отчёта${where}</b> (${who}; запросил(а) ${mention(job.requested_by_id, job.requested_by)})\n\n`;
+      let note = "";
+      if (best.why) note += `\n\n<i>🏆 Почему выбран этот ответ: ${esc(best.why.slice(0, 200))}</i>`;
+      // Какие модели не ответили и почему
+      if (best.errors.length) note += `\n<i>⚠️ ${esc(best.errors.join("; ").slice(0, 400))}</i>`;
+      await ctx.tg.edit(job.chat_id, job.placeholder_id, (header + esc(best.text)).slice(0, 3600) + note);
       await ctx.db.finishReportJob(job.id, "done");
     } catch (e) {
       console.error("Разбор отчёта не удался:", e);

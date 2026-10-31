@@ -30,8 +30,16 @@ const DB = {
 const calls = [];
 const tgState = { webhook: "", queue: [], deleted: new Set() }; // deleted — удалённые админом сообщения
 let nextId = 5000;
+let geminiHandler = null; // имитация Google Gemini: (body) => ответ или ошибка
 globalThis.fetch = async (url, init) => {
   if (url.includes("/file/bot")) return new Response(new Uint8Array([1, 2, 3, url.length]));
+  if (url.includes("generativelanguage.googleapis.com")) {
+    const body = JSON.parse(init.body);
+    calls.push({ method: "gemini", params: body, headers: init.headers, url });
+    const out = await geminiHandler(body);
+    if (out instanceof Error) return new Response(JSON.stringify({ error: { message: out.message } }), { status: 429 });
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: out }] } }] }));
+  }
   const method = url.split("/").pop();
   const params = init.body instanceof FormData ? Object.fromEntries(init.body) : JSON.parse(init.body);
   calls.push({ method, params });
@@ -683,132 +691,170 @@ test("админ удалил сообщение бота — бот больш�
   delete env.PHOTO_REMIND_TO;
 });
 
-test("разбор отчёта ИИ: «разбор» в ответ на фото, нормы, фоновая обработка", async () => {
+
+// ---------- разбор отчётов ИИ ----------
+const KIMI = "@cf/moonshotai/kimi-k2.6";
+const LLAMA = "@cf/meta/llama-4-scout-17b-16e-instruct";
+const isJudge = (system) => /Ты проверяешь разборы/.test(system);
+
+// Имитация Workers AI: answers[model] — текст, Error или функция (input) => ответ
+function fakeAI(answers) {
+  const log = [];
+  return {
+    log,
+    run: async (model, input) => {
+      log.push({ model, input, judge: isJudge(input.messages[0].content) });
+      const a = typeof answers[model] === "function" ? answers[model](input) : answers[model];
+      if (a instanceof Error) throw a;
+      return { response: a };
+    },
+  };
+}
+async function requestReport(text = "разбор", thread = 5) {
+  const report = await photo(ALI, "отчёт за неделю", { thread });
+  await msg(SAMI, text, { thread, reply: report });
+  return report;
+}
+const lastEdit = (cs) => cs.filter((c) => c.method === "editMessageText").at(-1)?.params.text || "";
+
+test("разбор отчёта: очередь, нормы, промпт с картинкой", async () => {
   tgState.webhook = "https://bot.example.workers.dev/webhook";
-  const aiCalls = [];
-  let aiReply = { choices: [{ message: { content: "<think>считаю</think>📊 Что в отчёте: выручка за неделю\n\n✅ Молодцы:\n— **средний чек** 1250 ₽\n\n⚠️ Улучшить:\n— доставка 38 мин (норма 30)" } }] };
-  env.AI = { run: async (model, input) => { aiCalls.push({ model, input }); if (aiReply instanceof Error) throw aiReply; return aiReply; } };
+  const ai = fakeAI({ [KIMI]: "<think>считаю</think>📍 Москва - 8\nГлавное: **много людей**", [LLAMA]: new Error("AiError: 3040: capacity") });
+  env.AI = ai;
   const T = { thread: 5 };
 
-  // нормы задаёт только админ
   let cs = await during(() => msg(ALI, "/normy_set всё отлично", T));
-  assert.equal(texts(cs).length, 0);
+  assert.equal(texts(cs).length, 0, "нормы задаёт только админ");
   await msg(ADM, "/normy_set доставка до 30 мин; списания до 2%", T);
   cs = await during(() => msg(SAMI, "/normy", T));
   assert.match(texts(cs)[0], /доставка до 30 мин/);
 
-  // «разбор» в ответ на фото
-  const report = await photo(ALI, "отчёт за неделю", { thread: 5 });
-  cs = await during(() => msg(SAMI, "разбор", { ...T, reply: report }));
-  const placeholder = one(cs, "sendMessage");
-  assert.match(placeholder.params.text, /Разбираю отчёт/);
-  assert.equal(placeholder.params.reply_parameters.message_id, report.message_id);
-  assert.equal(aiCalls.length, 0, "ИИ вызывается в фоне, не в вебхуке");
-
-  // «разбор» не на фото — подсказка
-  cs = await during(() => msg(SAMI, "разбор", { ...T, reply: { message_id: 1, date: 0, chat: G, text: "просто текст" } }));
+  cs = await during(() => requestReport());
+  assert.match(one(cs, "sendMessage").params.text, /Разбираю отчёт/);
+  assert.equal(ai.log.length, 0, "ИИ работает в фоне, не в вебхуке");
+  cs = await during(() => msg(SAMI, "разбор", { ...T, reply: { message_id: 1, date: 0, chat: G, text: "текст" } }));
   assert.match(texts(cs)[0], /на фото или скриншот/);
 
-  // планировщик: ИИ получает картинку и нормы, ответ встаёт на место «Разбираю…»
   cs = await during(runCron);
-  assert.equal(aiCalls.length, 1);
-  assert.equal(aiCalls[0].model, "@cf/moonshotai/kimi-k2.6");
-  const userMsg = aiCalls[0].input.messages[1];
-  assert.match(userMsg.content[0].text, /Нормы: доставка до 30 мин; списания до 2%[\s\S]*отчёт за неделю/);
-  assert.match(userMsg.content[1].image_url.url, /^data:image\/jpeg;base64,/);
-  const job = await DB.prepare("SELECT placeholder_id FROM report_jobs ORDER BY id LIMIT 1").first();
-  const result = cs.find((c) => c.method === "editMessageText" && c.params.message_id === job.placeholder_id);
-  assert.match(result.params.text, /Разбор отчёта[\s\S]*Sami[\s\S]*Молодцы[\s\S]*средний чек 1250[\s\S]*Улучшить/);
-  assert.doesNotMatch(result.params.text, /считаю|\*\*/, "без рассуждений и Markdown");
+  const kimiCall = ai.log.find((c) => c.model === KIMI);
+  const user = kimiCall.input.messages[1].content;
+  assert.match(user[0].text, /Нормы: доставка до 30 мин; списания до 2%[\s\S]*отчёт за неделю/);
+  assert.match(user[1].image_url.url, /^data:image\/jpeg;base64,/);
+  assert.match(kimiCall.input.messages[0].content, /менеджер/);
+  const text = lastEdit(cs);
+  assert.match(text, /Разбор отчёта[\s\S]*Kimi K2\.6[\s\S]*Sami[\s\S]*Главное: много людей/);
+  assert.doesNotMatch(text, /считаю|\*\*/, "без рассуждений и Markdown");
+  assert.match(text, /Llama 4 Scout: AiError: 3040/, "видно, какая модель не ответила");
+  assert.equal(ai.log.filter((c) => c.judge).length, 0, "один ответ — судья не нужен");
   cs = await during(runCron);
-  assert.equal(aiCalls.length, 1, "каждый отчёт разбирается один раз");
+  assert.equal(ai.log.length, 2, "каждый отчёт разбирается один раз");
+  delete env.AI;
+});
 
-  // ошибка ИИ (лимит) — после двух попыток понятное сообщение
-  aiReply = new Error("AiError: 4006: you have used up your daily free allocation of neurons");
-  const report2 = await photo(ALI, null, { thread: 5 });
-  await msg(ALI, "/razbor", { ...T, reply: report2 });
+test("разбор отчёта: несколько моделей, судья выбирает лучший", async () => {
+  const ai = fakeAI({
+    [KIMI]: (input) => isJudge(input.messages[0].content)
+      ? 'Сверил. {"best": "B", "why": "числа совпадают с отчётом"}'
+      : "Ответ Кими: проанализировать работу",
+    [LLAMA]: "Ответ Ламы: убери 1 повара 11–16 (до конца недели)",
+  });
+  env.AI = ai;
+  await requestReport();
+  const cs = await during(runCron);
+  const text = lastEdit(cs);
+  assert.match(text, /лучший из 2: Llama 4 Scout/);
+  assert.match(text, /убери 1 повара/);
+  assert.doesNotMatch(text, /Ответ Кими/);
+  assert.match(text, /Почему выбран этот ответ: числа совпадают с отчётом/);
+  const judgeCall = ai.log.find((c) => c.judge);
+  assert.equal(judgeCall.model, KIMI, "судья — самая сильная из ответивших");
+  const judgeText = judgeCall.input.messages[1].content[0].text;
+  assert.match(judgeText, /Разбор A[\s\S]*Ответ Кими[\s\S]*Разбор B[\s\S]*Ответ Ламы/);
+  assert.ok(judgeCall.input.messages[1].content[1].image_url, "судья видит отчёт");
+
+  // судья ответил ерундой — берём первый ответ
+  env.AI = fakeAI({ [KIMI]: (i) => (isJudge(i.messages[0].content) ? "не знаю" : "Ответ Кими"), [LLAMA]: "Ответ Ламы" });
+  await requestReport();
+  assert.match(lastEdit(await during(runCron)), /лучший из 2: Kimi K2\.6[\s\S]*Ответ Кими/);
+  delete env.AI;
+});
+
+test("разбор отчёта: Gemini участвует и судит, если есть ключ", async () => {
+  env.AI = fakeAI({ [KIMI]: new Error("AiError: 5006: bad input"), [LLAMA]: "Ответ Ламы" });
+  env.GEMINI_API_KEY = " test-key ";
+  geminiHandler = (body) => /Ты проверяешь разборы/.test(body.system_instruction.parts[0].text)
+    ? '{"best": "A", "why": "конкретнее и цифры верные"}'
+    : "Ответ Gemini: поставь 2 заказа на курьера (на ближайшей смене)";
+  await requestReport();
+  const cs = await during(runCron);
+  const gem = cs.filter((c) => c.method === "gemini");
+  assert.equal(gem.length, 2, "ответ + судейство");
+  assert.equal(gem[0].headers["x-goog-api-key"], "test-key");
+  assert.match(gem[0].url, /models\/gemini-flash-latest:generateContent/);
+  assert.equal(gem[0].params.contents[0].parts[1].inline_data.mime_type, "image/jpeg");
+  const text = lastEdit(cs);
+  assert.match(text, /лучший из 2: Gemini[\s\S]*2 заказа на курьера/);
+  assert.match(text, /Kimi K2\.6: AiError: 5006/);
+
+  // только Gemini, без Workers AI — тоже работает
+  delete env.AI;
+  await requestReport();
+  assert.match(lastEdit(await during(runCron)), /\(Gemini; запросил/);
+
+  // лимит у всех — понятное сообщение после двух попыток
+  geminiHandler = () => new Error("Resource has been exhausted (e.g. check quota).");
+  await requestReport();
   await runCron();
-  cs = await during(runCron);
-  const limitMsg = cs.find((c) => c.method === "editMessageText" && /дневной лимит ИИ закончился/.test(c.params.text));
-  assert.ok(limitMsg);
-  assert.match(limitMsg.params.text, /Причина: Kimi K2\.6: AiError: 4006[\s\S]*Kimi K2\.5[\s\S]*Llama 4 Scout/,
-    "перепробованы все модели, причина видна");
-  cs = await during(runCron);
-  assert.equal(cs.filter((c) => c.method === "editMessageText" && /лимит/.test(c.params.text || "")).length, 0);
+  const fail = lastEdit(await during(runCron));
+  assert.match(fail, /дневной лимит ИИ закончился[\s\S]*Причина: Gemini: HTTP 429/);
+  delete env.GEMINI_API_KEY;
+  geminiHandler = null;
+});
 
-  // в теме отчётов фото разбирается без слова «разбор»
-  aiReply = { response: "📊 Что в отчёте: касса" };
+test("разбор отчёта: точка по умолчанию, точка в запросе, тема отчётов", async () => {
+  const ai = fakeAI({ [KIMI]: "📍 разбор", [LLAMA]: new Error("нет") });
+  env.AI = ai;
+  const T = { thread: 5 };
+  const lastPrompt = () => ai.log.filter((c) => !c.judge).at(-1).input.messages[1].content[0].text;
+
+  env.REPORT_LOCATION = "Москва 8";
+  await requestReport();
+  let cs = await during(runCron);
+  assert.match(lastPrompt(), /Разбери точку: Москва 8\./);
+  assert.match(lastEdit(cs), /Разбор отчёта: Москва 8/);
+
+  await requestReport("Разбор Москва 3");
+  cs = await during(runCron);
+  assert.match(lastPrompt(), /Разбери точку: Москва 3\./);
+  assert.match(lastEdit(cs), /Разбор отчёта: Москва 3/);
+
+  await msg(ALI, "/tochka_set Москва 1", T);
+  cs = await during(() => msg(SAMI, "/tochka", T));
+  assert.match(texts(cs)[0], /Москва 8/, "не-админ не меняет точку");
+  await msg(ADM, "/tochka_set Москва 5", T);
+  await requestReport();
+  await runCron();
+  assert.match(lastPrompt(), /Разбери точку: Москва 5\./);
+
+  await msg(ADM, "/tochka_set", T);
+  delete env.REPORT_LOCATION;
+  await requestReport();
+  cs = await during(runCron);
+  assert.match(lastPrompt(), /Точка не указана/);
+  assert.match(lastEdit(cs), /Разбор отчёта по сети/);
+
+  // тема отчётов: фото разбирается без слова «разбор»
   env.REPORT_TOPIC = "https://t.me/c/1/95";
   cs = await during(() => photo(ALI, null, { thread: 95 }));
   assert.match(one(cs, "sendMessage").params.text, /Разбираю отчёт/);
   cs = await during(() => photo(ALI, null, { thread: 5 }));
-  assert.equal(cs.filter((c) => /Разбираю/.test(c.params.text || "")).length, 0, "в других темах — только по слову «разбор»");
-  cs = await during(runCron);
-  assert.ok(cs.some((c) => c.method === "editMessageText" && /Что в отчёте: касса/.test(c.params.text)));
-
-  // без привязки ИИ — честное сообщение
-  delete env.AI;
-  cs = await during(() => msg(SAMI, "разбор", { ...T, reply: report }));
-  assert.match(texts(cs)[0], /не подключён/);
-  delete env.REPORT_TOPIC;
-});
-
-test("разбор отчёта: если основная модель упала — отвечает запасная", async () => {
-  tgState.webhook = "https://bot.example.workers.dev/webhook";
-  const used = [];
-  env.AI = { run: async (model) => {
-    used.push(model);
-    if (model === "@cf/moonshotai/kimi-k2.6") throw new Error("AiError: 5006: input format not supported");
-    return { response: "✅ Молодцы: выручка" };
-  } };
-  const report = await photo(ALI, null, { thread: 5 });
-  await msg(SAMI, "Разбор", { thread: 5, reply: report });
-  const cs = await during(runCron);
-  assert.deepEqual(used, ["@cf/moonshotai/kimi-k2.6", "@cf/moonshotai/kimi-k2.5"]);
-  assert.ok(cs.some((c) => c.method === "editMessageText" && /Разбор отчёта[\s\S]*Kimi K2\.5[\s\S]*Молодцы/.test(c.params.text)));
-  assert.ok(cs.some((c) => c.method === "editMessageText" && /Kimi K2\.6: AiError: 5006: input format not supported/.test(c.params.text)),
-    "видно, почему не ответила основная модель");
-  delete env.AI;
-});
-
-test("разбор отчёта: точка по умолчанию и точка в запросе", async () => {
-  tgState.webhook = "https://bot.example.workers.dev/webhook";
-  const prompts = [];
-  env.AI = { run: async (model, input) => { prompts.push(input.messages[1].content[0].text); return { response: "📍 разбор" }; } };
-  const T = { thread: 5 };
-  const lastEdit = (cs) => cs.filter((c) => c.method === "editMessageText").at(-1).params.text;
-
-  // точка из настроек (REPORT_LOCATION)
-  env.REPORT_LOCATION = "Москва 8";
-  const report = await photo(ALI, null, T);
-  await msg(SAMI, "разбор", { ...T, reply: report });
-  let cs = await during(runCron);
-  assert.match(prompts.at(-1), /Разбери точку: Москва 8\./);
-  assert.match(lastEdit(cs), /Разбор отчёта: Москва 8/);
-
-  // другая точка прямо в запросе
-  await msg(SAMI, "Разбор Москва 3", { ...T, reply: report });
-  cs = await during(runCron);
-  assert.match(prompts.at(-1), /Разбери точку: Москва 3\./);
-  assert.match(lastEdit(cs), /Разбор отчёта: Москва 3/);
-
-  // админ меняет точку по умолчанию; не-админ — нет
-  await msg(ALI, "/tochka_set Москва 1", T);
-  cs = await during(() => msg(SAMI, "/tochka", T));
-  assert.match(texts(cs)[0], /Москва 8/);
-  await msg(ADM, "/tochka_set Москва 5", T);
-  cs = await during(() => msg(SAMI, "/tochka", T));
-  assert.match(texts(cs)[0], /Москва 5/);
-  await msg(SAMI, "разбор", { ...T, reply: report });
+  assert.equal(cs.filter((c) => /Разбираю/.test(c.params.text || "")).length, 0);
   await runCron();
-  assert.match(prompts.at(-1), /Разбери точку: Москва 5\./);
+  delete env.REPORT_TOPIC;
 
-  // без точки — разбор всей сети
-  await msg(ADM, "/tochka_set", T);
-  delete env.REPORT_LOCATION;
-  await msg(SAMI, "разбор", { ...T, reply: report });
-  cs = await during(runCron);
-  assert.match(prompts.at(-1), /Точка не указана/);
-  assert.match(lastEdit(cs), /Разбор отчёта по сети/);
+  // без ИИ — честное сообщение
   delete env.AI;
+  await requestReport();
+  cs = await during(() => msg(SAMI, "разбор", { ...T, reply: { message_id: 2, date: 0, chat: G, photo: [{ file_id: "x" }] } }));
+  assert.match(texts(cs)[0], /не подключён/);
 });

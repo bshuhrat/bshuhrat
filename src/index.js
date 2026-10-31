@@ -35,6 +35,8 @@ function loadConfig(env) {
     reportTopic: parseTopicLink(env.REPORT_TOPIC),
     reportLocation: String(env.REPORT_LOCATION || "").trim(),
     aiModel: String(env.AI_MODEL || DEFAULT_AI_MODEL).trim(),
+    geminiKey: String(env.GEMINI_API_KEY || "").trim(),
+    geminiModel: String(env.GEMINI_MODEL || "gemini-flash-latest").trim(),
     repairTopic: parseTopicLink(env.REPAIR_TOPIC),
     repairSystemUrl: String(env.REPAIR_SYSTEM_URL || "").trim(),
     // Через сколько часов каждое следующее напоминание; последнее значение повторяется
