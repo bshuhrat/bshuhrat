@@ -57,7 +57,7 @@ const SCHEMA = [
     source_message_id INTEGER NOT NULL, file_id TEXT NOT NULL, caption TEXT,
     requested_by TEXT, requested_by_id INTEGER, placeholder_id INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending', -- pending | done | failed
-    attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
+    attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, location TEXT)`,
   // Состояние диалога с админом (ждём комментарий / ответ)
   `CREATE TABLE IF NOT EXISTS states (
     user_id INTEGER PRIMARY KEY, state TEXT NOT NULL, data TEXT)`,
@@ -73,6 +73,7 @@ const MIGRATIONS = [
   "ALTER TABLE photo_fixes ADD COLUMN control_message_id INTEGER",
   "ALTER TABLE photo_fixes ADD COLUMN admin_messages TEXT",
   "ALTER TABLE repairs ADD COLUMN check_message_ids TEXT",
+  "ALTER TABLE report_jobs ADD COLUMN location TEXT",
 ];
 
 let schemaReady = false;
@@ -550,11 +551,12 @@ export class Database {
   }
 
   // ---------- разбор отчётов ----------
-  createReportJob({ chatId, threadId, sourceMessageId, fileId, caption, requestedBy, requestedById, placeholderId }) {
+  createReportJob({ chatId, threadId, sourceMessageId, fileId, caption, requestedBy, requestedById, placeholderId, location }) {
     return this.run(
       `INSERT INTO report_jobs (chat_id, thread_id, source_message_id, file_id, caption, requested_by,
-       requested_by_id, placeholder_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       requested_by_id, placeholder_id, created_at, location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       chatId, threadId, sourceMessageId, fileId, caption, requestedBy, requestedById, placeholderId, nowIso(),
+      location || null,
     );
   }
 

@@ -768,3 +768,45 @@ test("разбор отчёта: если основная модель упал
   assert.ok(cs.some((c) => c.method === "editMessageText" && /Разбор отчёта[\s\S]*Kimi K2\.5[\s\S]*Молодцы/.test(c.params.text)));
   delete env.AI;
 });
+
+test("разбор отчёта: точка по умолчанию и точка в запросе", async () => {
+  tgState.webhook = "https://bot.example.workers.dev/webhook";
+  const prompts = [];
+  env.AI = { run: async (model, input) => { prompts.push(input.messages[1].content[0].text); return { response: "📍 разбор" }; } };
+  const T = { thread: 5 };
+  const lastEdit = (cs) => cs.filter((c) => c.method === "editMessageText").at(-1).params.text;
+
+  // точка из настроек (REPORT_LOCATION)
+  env.REPORT_LOCATION = "Москва 8";
+  const report = await photo(ALI, null, T);
+  await msg(SAMI, "разбор", { ...T, reply: report });
+  let cs = await during(runCron);
+  assert.match(prompts.at(-1), /Разбери точку: Москва 8\./);
+  assert.match(lastEdit(cs), /Разбор отчёта: Москва 8/);
+
+  // другая точка прямо в запросе
+  await msg(SAMI, "Разбор Москва 3", { ...T, reply: report });
+  cs = await during(runCron);
+  assert.match(prompts.at(-1), /Разбери точку: Москва 3\./);
+  assert.match(lastEdit(cs), /Разбор отчёта: Москва 3/);
+
+  // админ меняет точку по умолчанию; не-админ — нет
+  await msg(ALI, "/tochka_set Москва 1", T);
+  cs = await during(() => msg(SAMI, "/tochka", T));
+  assert.match(texts(cs)[0], /Москва 8/);
+  await msg(ADM, "/tochka_set Москва 5", T);
+  cs = await during(() => msg(SAMI, "/tochka", T));
+  assert.match(texts(cs)[0], /Москва 5/);
+  await msg(SAMI, "разбор", { ...T, reply: report });
+  await runCron();
+  assert.match(prompts.at(-1), /Разбери точку: Москва 5\./);
+
+  // без точки — разбор всей сети
+  await msg(ADM, "/tochka_set", T);
+  delete env.REPORT_LOCATION;
+  await msg(SAMI, "разбор", { ...T, reply: report });
+  cs = await during(runCron);
+  assert.match(prompts.at(-1), /Точка не указана/);
+  assert.match(lastEdit(cs), /Разбор отчёта по сети/);
+  delete env.AI;
+});

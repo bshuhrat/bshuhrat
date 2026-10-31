@@ -33,6 +33,7 @@ function loadConfig(env) {
     photoFixTimeoutMin: Number(env.PHOTO_FIX_TIMEOUT_MIN || 60),
     photoTopic: parseTopicLink(env.PHOTO_TOPIC),
     reportTopic: parseTopicLink(env.REPORT_TOPIC),
+    reportLocation: String(env.REPORT_LOCATION || "").trim(),
     aiModel: String(env.AI_MODEL || DEFAULT_AI_MODEL).trim(),
     repairTopic: parseTopicLink(env.REPAIR_TOPIC),
     repairSystemUrl: String(env.REPAIR_SYSTEM_URL || "").trim(),

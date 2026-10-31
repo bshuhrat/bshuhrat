@@ -15,28 +15,37 @@ const modelName = (m) => MODEL_NAMES[m] || m.split("/").pop();
 const JOBS_PER_RUN = 2;
 const MAX_ATTEMPTS = 2;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
-const TRIGGER_RE = /^\s*(?:\/(?:razbor|report)(?:@\w+)?|разбор|разбери)\s*$/iu;
+// «разбор», «разбор Москва 8», «/razbor Москва 3»
+const TRIGGER_RE = /^\s*(?:\/(?:razbor|report)(?:@\w+)?|разбор|разбери)(?:\s+(.+?))?\s*$/iu;
 
-const SYSTEM_PROMPT = `Ты — опытный управляющий сетью пиццерий. Тебе присылают фото или скриншот отчёта с показателями.
-Разбери его и ответь строго по-русски, коротко, обычным текстом с эмодзи. Не используй Markdown: никаких *, #, таблиц.
+const SYSTEM_PROMPT = `Ты — операционный директор сети пиццерий и разбираешь операционный отчёт (дашборд) одной точки.
+Пиши строго по-русски, обычным текстом с эмодзи. Не используй Markdown: никаких *, #, таблиц.
+
+Как читать отчёт:
+— Это таблица: строки — пиццерии (например «Москва - 8»), столбцы — показатели (выручка, производительность кухни и курьеров, сертификаты за опоздание, рейтинг клиентов, упущенная выручка из-за стоп-листов, время доставки, доля поездок с одним заказом, доля долгих доставок, время приготовления и т.д.). Внизу строка «Сеть» — итог/среднее по сети.
+— Найди строку нужной точки (название может быть записано как «Москва - 8», «Москва-8», «Москва 8»). Если у точки есть строка «Итог» и разбивка по ресторанам — бери «Итог».
+— Внимательно прочитай заголовки столбцов и значения именно этой строки. Бери только то, что реально видно; если число не читается — так и напиши. Ничего не выдумывай.
+
+Как оценивать:
+— Сравнивай каждый показатель точки со строкой «Сеть» и с нормами, если они даны. Лучше сети — сильная сторона, хуже — проблема.
+— Учитывай направление: выручка, производительность, рейтинг — чем больше, тем лучше; время, доли опозданий и долгих заказов, упущенная выручка, стопы, сертификаты за опоздание — чем меньше, тем лучше.
+— Причину ищи в связанных показателях этой же точки (например: долгая доставка + много поездок с одним заказом + низкая производительность курьеров → не хватает курьеров в пик или их неправильно отправляют). Не пиши общих фраз вроде «улучшить работу» — только конкретику.
 
 Формат ответа:
-📊 Что в отчёте: одна строка — какой это отчёт и за какой период (если видно).
+📍 <точка> — <период, если виден>
 
 ✅ Молодцы:
-— показатель: значение — почему это хорошо
+— <показатель>: <значение> (сеть <значение>)
 
-⚠️ Улучшить:
-— показатель: значение (норма …) — в чём проблема
+⚠️ Проблемы (сначала те, что сильнее бьют по деньгам и клиентам):
+1. <показатель>: <значение> (сеть <значение>; норма <если дана>)
+Причина: <конкретная причина со ссылкой на связанные показатели>
+Что делать: <2–3 конкретных действия: кто делает, что именно, к какому сроку>
+Цель: <какое значение должно быть через неделю>
 
-🎯 Что сделать:
-1. … (2–4 конкретных шага, самые важные первыми)
+🎯 Главное на эту неделю: 1–3 действия, с которых начать.
 
-Правила:
-— Бери только цифры, которые реально видны на изображении. Ничего не выдумывай.
-— Если часть цифр не читается — так и напиши.
-— Сравнивай с нормами, если они даны. Если норм нет — оценивай по типичным показателям пиццерий и пометь это словами «(обычно в пиццериях …)».
-— Если на изображении не отчёт с показателями — ответь одной строкой: «На фото нет отчёта с показателями».`;
+Если нужной точки в отчёте нет — напиши это и перечисли точки, которые видны. Если на фото не отчёт с показателями — ответь одной строкой: «На фото нет отчёта с показателями».`;
 
 export function isReportTopic(ctx, chatId, threadId) {
   const t = ctx.cfg.reportTopic;
@@ -56,6 +65,12 @@ function imageOf(msg) {
 }
 
 const normsKey = (chatId) => `report_norms:${chatId}`;
+const locationKey = (chatId) => `report_location:${chatId}`;
+
+// Точка для разбора по умолчанию: заданная в чате командой /tochka_set или REPORT_LOCATION
+async function defaultLocation(ctx, chatId) {
+  return (await ctx.db.getSetting(locationKey(chatId))) || ctx.cfg.reportLocation || "";
+}
 
 // true — сообщение обработано (поставлено в очередь на разбор или это команда норм)
 export async function handleReportMessage(ctx, msg) {
@@ -78,10 +93,28 @@ export async function handleReportMessage(ctx, msg) {
     return true;
   }
 
+  // Точка по умолчанию: /tochka — показать, /tochka_set Москва 8 — задать (админ)
+  if (command?.cmd === "tochka") {
+    const loc = await defaultLocation(ctx, chatId);
+    await ctx.tg.reply(msg, loc
+      ? `📍 Отчёты разбираются по точке: <b>${esc(loc)}</b>\nДругую точку можно указать в запросе: <code>разбор Москва 3</code>`
+      : "Точка по умолчанию не задана — разбирается вся сеть.\nАдмин может задать: <code>/tochka_set Москва 8</code>");
+    return true;
+  }
+  if (command?.cmd === "tochka_set") {
+    if (!ctx.cfg.adminIds.has(msg.from.id)) return true;
+    await ctx.db.setSetting(locationKey(chatId), command.args);
+    await ctx.tg.reply(msg, command.args ? `✅ Теперь отчёты разбираются по точке «${esc(command.args)}».` : "Точка по умолчанию очищена.");
+    return true;
+  }
+
   // «разбор» в ответ на фото — в любой теме; в теме отчётов — любое фото
   let source = null;
-  if (msg.reply_to_message && TRIGGER_RE.test(msg.text || "")) {
+  let location = "";
+  const trigger = (msg.text || "").match(TRIGGER_RE);
+  if (msg.reply_to_message && trigger) {
     source = msg.reply_to_message;
+    location = (trigger[1] || "").trim();
     if (!imageOf(source)) {
       await ctx.tg.reply(msg, "Ответьте словом «разбор» на фото или скриншот отчёта.");
       return true;
@@ -107,7 +140,7 @@ export async function handleReportMessage(ctx, msg) {
   await ctx.db.createReportJob({
     chatId, threadId: threadOf(msg), sourceMessageId: source.message_id, fileId: image.fileId,
     caption: source.caption || "", requestedBy: fullName(msg.from), requestedById: msg.from.id,
-    placeholderId: placeholder.message_id,
+    placeholderId: placeholder.message_id, location: location || await defaultLocation(ctx, chatId),
   });
   return true;
 }
@@ -143,7 +176,9 @@ async function analyze(ctx, job) {
   const bytes = await ctx.tg.download(job.file_id);
   const mime = bytes[0] === 0x89 ? "image/png" : "image/jpeg";
   const norms = await ctx.db.getSetting(normsKey(job.chat_id));
-  let prompt = "Разбери этот отчёт.";
+  let prompt = job.location
+    ? `Разбери точку: ${job.location}. Остальные точки используй только для сравнения.`
+    : "Точка не указана — разбери итог по сети и коротко отметь лучшую и худшую точки.";
   if (norms) prompt += `\nНормы: ${norms}`;
   if (job.caption) prompt += `\nКомментарий к фото: ${job.caption}`;
 
@@ -182,7 +217,8 @@ export async function processReportJobs(ctx) {
     await ctx.db.bumpReportJob(job.id);
     try {
       const { text, model } = await analyze(ctx, job);
-      const header = `🤖 <b>Разбор отчёта</b> (запросил(а) ${mention(job.requested_by_id, job.requested_by)}, ` +
+      const where = job.location ? `: ${esc(job.location)}` : " по сети";
+      const header = `🤖 <b>Разбор отчёта${where}</b> (запросил(а) ${mention(job.requested_by_id, job.requested_by)}, ` +
         `${esc(modelName(model))})\n\n`;
       await ctx.tg.edit(job.chat_id, job.placeholder_id, (header + esc(text)).slice(0, 4000));
       await ctx.db.finishReportJob(job.id, "done");
