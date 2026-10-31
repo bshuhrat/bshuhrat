@@ -766,6 +766,8 @@ test("разбор отчёта: если основная модель упал
   const cs = await during(runCron);
   assert.deepEqual(used, ["@cf/moonshotai/kimi-k2.6", "@cf/moonshotai/kimi-k2.5"]);
   assert.ok(cs.some((c) => c.method === "editMessageText" && /Разбор отчёта[\s\S]*Kimi K2\.5[\s\S]*Молодцы/.test(c.params.text)));
+  assert.ok(cs.some((c) => c.method === "editMessageText" && /Kimi K2\.6: AiError: 5006: input format not supported/.test(c.params.text)),
+    "видно, почему не ответила основная модель");
   delete env.AI;
 });
 
