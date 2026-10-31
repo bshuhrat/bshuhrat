@@ -54,7 +54,8 @@ export async function fullReport(ctx) {
   const tz = ctx.cfg.timezone;
   const tasks = await ctx.db.allTasks();
   const fixes = await ctx.db.donePhotoFixes();
-  if (!tasks.length && !fixes.length) return "📊 Пока нет ни одного задания.";
+  const repairs = await ctx.db.allRepairs();
+  if (!tasks.length && !fixes.length && !repairs.length) return "📊 Пока нет ни одного задания.";
   const subs = await ctx.db.allSubmissions();
 
   const approved = subs.filter((s) => s.status === "approved");
@@ -121,6 +122,11 @@ export async function fullReport(ctx) {
     for (const e of [...perFixer.values()].sort((a, b) => b.n - a.n)) {
       lines.push(`• ${esc(e.name)} — ${e.n}`);
     }
+  }
+
+  if (repairs.length) {
+    const n = (st) => repairs.filter((r) => r.status === st).length;
+    lines.push("", `🛠 <b>Поломки</b>: открыто ${n("open")} · починили ${n("fixed")} · не поломка ${n("rejected")}`);
   }
 
   if (tasks.length) {

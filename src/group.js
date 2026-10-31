@@ -1,5 +1,6 @@
 // Обработчики в групповом чате: темы, автоответы, задания, сдачи, запросы, фото.
 import { handleAdminReturn, handlePhoto, onFixButton, onReturnButton } from "./photofix.js";
+import { handleRepairCommand, handleRepairMessage, onRepairButton } from "./repairs.js";
 import { acceptSubmission, closeTask, publishTask, registerRequest } from "./services.js";
 import { taskSummary } from "./stats.js";
 import {
@@ -17,7 +18,8 @@ const HELP_MEMBER = `🤖 <b>Команды бота</b>
 /ask <i>текст</i> — задать вопрос администратору
 /my — моя статистика
 Сдать задание — ответьте (reply) на сообщение с заданием или напишите <code>#сдаю</code> в теме с одним открытым заданием.
-В теме фото-исправлений нажмите «📷 Отправить фото исправление» под фото и пришлите исправленное фото.`;
+В теме фото-исправлений нажмите «📷 Отправить фото исправление» под фото и пришлите исправленное фото.
+В теме поломок: /zayavki — открытые заявки, /kw — слова, на которые реагирует бот.`;
 
 const HELP_ADMIN = `
 
@@ -30,6 +32,7 @@ const HELP_ADMIN = `
    дедлайн: <code>25.10.2026 18:00</code> или <code>25.10</code>
 /photo_topic — сделать текущую тему темой фото-исправлений (<code>/photo_topic off</code> — выключить)
 Не согласны с фото-исправлением — ответьте (reply) на альбом словом <code>вернуть</code> (можно с причиной: <code>вернуть плохо видно</code>). Бот удалит ваше сообщение и вернёт фото в работу
+В теме поломок: <code>/kw_add слово</code> / <code>/kw_del слово</code> — слова, на которые бот реагирует
 /close <i>id</i> — закрыть задание и получить итог
 /stat <i>id</i> — итог по заданию (придёт в личку)`;
 
@@ -83,6 +86,7 @@ export async function handleGroupMessage(ctx, msg) {
       return;
     }
   }
+  if (await handleRepairMessage(ctx, msg)) return;
   if (await handlePhoto(ctx, msg)) return;
   await autoAnswer(ctx, msg);
 }
@@ -92,6 +96,8 @@ async function handleCommand(ctx, msg, { cmd, args }) {
   const chatId = msg.chat.id;
   const threadId = threadOf(msg);
   const admin = isAdmin(ctx, msg.from);
+
+  if (await handleRepairCommand(ctx, msg, cmd, args, admin)) return;
 
   switch (cmd) {
     case "help":
@@ -292,7 +298,9 @@ async function autoAnswer(ctx, msg) {
 
 export async function handleGroupCallback(ctx, call) {
   const [kind, id] = call.data.split(":");
-  if (kind === "fix") {
+  if (kind === "rp") {
+    await onRepairButton(ctx, call);
+  } else if (kind === "fix") {
     await onFixButton(ctx, call);
   } else if (kind === "ret") {
     await onReturnButton(ctx, call);

@@ -1,5 +1,6 @@
 // Запускается Cloudflare каждую минуту: дедлайны, ежедневный отчёт, фото-исправления.
 import { releaseExpired, remindUnfixed } from "./photofix.js";
+import { checkRepairs } from "./repairs.js";
 import { notifyAdmins } from "./services.js";
 import { fullReport, participants, taskSummary } from "./stats.js";
 import { esc, fmtDt, localParts, mention } from "./utils.js";
@@ -42,7 +43,8 @@ async function checkDailyReport(ctx) {
   if (local.time < ctx.cfg.dailyReportTime) return;
   if ((await ctx.db.getSetting("last_daily_report")) === local.date) return;
   await ctx.db.setSetting("last_daily_report", local.date);
-  if (!(await ctx.db.allTasks()).length && !(await ctx.db.donePhotoFixes()).length) return;
+  if (!(await ctx.db.allTasks()).length && !(await ctx.db.donePhotoFixes()).length &&
+    !(await ctx.db.allRepairs()).length) return;
   let report = await fullReport(ctx);
   const pending = (await ctx.db.pendingSubmissions()).length;
   if (pending) report += `\n\n⏳ Ждут вашей проверки: ${pending} (/pending)`;
@@ -50,7 +52,7 @@ async function checkDailyReport(ctx) {
 }
 
 export async function runScheduled(ctx) {
-  for (const job of [checkDeadlines, checkDailyReport, releaseExpired, remindUnfixed]) {
+  for (const job of [checkDeadlines, checkDailyReport, releaseExpired, remindUnfixed, checkRepairs]) {
     try {
       await job(ctx);
     } catch (e) {

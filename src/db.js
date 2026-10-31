@@ -39,6 +39,17 @@ const SCHEMA = [
     fixer_id INTEGER, fixer_name TEXT, claimed_at TEXT, fix_message_id INTEGER, done_at TEXT,
     created_at TEXT, reminded INTEGER NOT NULL DEFAULT 0, prompt_message_id INTEGER,
     result_message_ids TEXT, control_message_id INTEGER, admin_messages TEXT)`,
+  // Поломки: заявки во внешней системе, бот только напоминает и уточняет статус
+  `CREATE TABLE IF NOT EXISTS repairs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL, user_id INTEGER NOT NULL, user_name TEXT NOT NULL, text TEXT NOT NULL,
+    keyword TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', -- open | fixed | rejected
+    created_at TEXT NOT NULL, next_check_at TEXT NOT NULL, checks INTEGER NOT NULL DEFAULT 0,
+    bot_message_id INTEGER, check_message_id INTEGER, closed_by_id INTEGER, closed_by_name TEXT,
+    closed_at TEXT, close_message_id INTEGER, photo_file_id TEXT, UNIQUE (chat_id, message_id))`,
+  `CREATE TABLE IF NOT EXISTS repair_keywords (
+    chat_id INTEGER NOT NULL, keyword TEXT NOT NULL, enabled INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, keyword))`,
   // Состояние диалога с админом (ждём комментарий / ответ)
   `CREATE TABLE IF NOT EXISTS states (
     user_id INTEGER PRIMARY KEY, state TEXT NOT NULL, data TEXT)`,
@@ -436,6 +447,85 @@ export class Database {
 
   donePhotoFixes() {
     return this.all("SELECT * FROM photo_fixes WHERE status = 'done'");
+  }
+
+  // ---------- поломки ----------
+  // Новая заявка; null — это сообщение уже зарегистрировано
+  async createRepair({ chatId, threadId, messageId, userId, userName, text, keyword, nextCheckAt }) {
+    const r = await this.run(
+      `INSERT OR IGNORE INTO repairs (chat_id, thread_id, message_id, user_id, user_name, text, keyword,
+       created_at, next_check_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      chatId, threadId, messageId, userId, userName, text, keyword, nowIso(), nextCheckAt,
+    );
+    return r.changes > 0 ? r.lastId : null;
+  }
+
+  getRepair(id) {
+    return this.one("SELECT * FROM repairs WHERE id = ?", id);
+  }
+
+  setRepairBotMessage(id, messageId) {
+    return this.run("UPDATE repairs SET bot_message_id = ? WHERE id = ?", messageId, id);
+  }
+
+  setRepairCheckMessage(id, messageId) {
+    return this.run(
+      "UPDATE repairs SET check_message_id = ?, checks = checks + 1 WHERE id = ?", messageId, id,
+    );
+  }
+
+  setRepairNextCheck(id, iso) {
+    return this.run("UPDATE repairs SET next_check_at = ? WHERE id = ?", iso, id);
+  }
+
+  // Атомарно закрывает открытую заявку. false — уже закрыта
+  async closeRepair(id, status, byId, byName, closeMessageId) {
+    const r = await this.run(
+      `UPDATE repairs SET status = ?, closed_by_id = ?, closed_by_name = ?, closed_at = ?,
+       close_message_id = ? WHERE id = ? AND status = 'open'`,
+      status, byId, byName, nowIso(), closeMessageId, id,
+    );
+    return r.changes > 0;
+  }
+
+  setRepairPhoto(id, fileId) {
+    return this.run("UPDATE repairs SET photo_file_id = ? WHERE id = ?", fileId, id);
+  }
+
+  // Заявка, к которой относится сообщение (исходное, ответ бота, проверка статуса, закрытие)
+  repairByAnyMessage(chatId, messageId) {
+    return this.one(
+      `SELECT * FROM repairs WHERE chat_id = ? AND (message_id = ? OR bot_message_id = ?
+       OR check_message_id = ? OR close_message_id = ?) ORDER BY id DESC LIMIT 1`,
+      chatId, messageId, messageId, messageId, messageId,
+    );
+  }
+
+  openRepairs(chatId) {
+    return this.all("SELECT * FROM repairs WHERE chat_id = ? AND status = 'open' ORDER BY id", chatId);
+  }
+
+  dueRepairs(nowIso_, limit) {
+    return this.all(
+      "SELECT * FROM repairs WHERE status = 'open' AND next_check_at <= ? ORDER BY next_check_at LIMIT ?",
+      nowIso_, limit,
+    );
+  }
+
+  allRepairs() {
+    return this.all("SELECT * FROM repairs ORDER BY id");
+  }
+
+  repairKeywordRows(chatId) {
+    return this.all("SELECT * FROM repair_keywords WHERE chat_id = ?", chatId);
+  }
+
+  setRepairKeyword(chatId, keyword, enabled) {
+    return this.run(
+      `INSERT INTO repair_keywords (chat_id, keyword, enabled) VALUES (?, ?, ?)
+       ON CONFLICT (chat_id, keyword) DO UPDATE SET enabled = excluded.enabled`,
+      chatId, keyword, enabled ? 1 : 0,
+    );
   }
 
   // ---------- состояние диалога ----------
