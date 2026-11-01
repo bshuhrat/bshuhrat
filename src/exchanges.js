@@ -8,7 +8,6 @@ const DAY = 24 * HOUR;
 const BATCH = 10;
 const EXCERPT = 120;
 const REMIND_TIME = "12:00"; // во сколько напоминать в выбранный день и при повторах
-const TODAY_TIME = "20:00"; // «сегодня» — к вечеру
 
 // Виды обменов. Порядок важен: «дали в долг» проверяется раньше, чем «в долг».
 // Слова — начала слов: «отдал» ловит «отдали», «отдала».
@@ -26,8 +25,8 @@ export const EXCHANGE_KINDS = [
   {
     kind: "borrowed", emoji: "🔁", title: "Взяли в долг", todo: "вернуть",
     ask: "Когда вернёте?",
-    words: ["взяли в долг", "взял в долг", "взяла в долг", "в долг", "заняли", "занял", "одолжили у", "одолжил у",
-      "взяли у", "взял у", "взяла у"],
+    // «Взяли картошку и тесто Москва 2» — тоже долг: в этой теме «взяли» значит у другой пиццерии
+    words: ["взяли", "взял", "взяла", "в долг", "заняли", "занял", "одолжили у", "одолжил у"],
   },
 ];
 const KIND = Object.fromEntries(EXCHANGE_KINDS.map((k) => [k.kind, k]));
@@ -58,18 +57,11 @@ function localAt(tz, days, time) {
   return parseDeadline(`${d}.${m}.${y} ${time}`, tz);
 }
 
+// В тот же день вернуть нельзя — самый ранний срок «завтра»
 const DUE_OPTIONS = [
-  ["d0", "Сегодня"], ["d1", "Завтра"], ["d3", "Через 3 дня"], ["d7", "Через неделю"],
+  ["d1", "Завтра"], ["d2", "Послезавтра"], ["d3", "Через 3 дня"], ["d7", "Через неделю"],
 ];
-function dueFor(ctx, option) {
-  const tz = ctx.cfg.timezone;
-  if (option === "d0") {
-    const iso = localAt(tz, 0, TODAY_TIME);
-    // вечер уже прошёл — напомним через час
-    return Date.parse(iso) > Date.now() ? iso : new Date(Date.now() + HOUR).toISOString().slice(0, 19) + "Z";
-  }
-  return localAt(tz, Number(option.slice(1)), REMIND_TIME);
-}
+const dueFor = (ctx, option) => localAt(ctx.cfg.timezone, Number(option.slice(1)), REMIND_TIME);
 
 const btn = (text, data, style) => ({ text, callback_data: data, ...(style ? { style } : {}) });
 const dueKeyboard = (id) => ({
@@ -262,7 +254,7 @@ export async function checkExchanges(ctx) {
 const HELP_TEXT = `📌 <b>Тема обменов между пиццериями — как работает бот</b>
 
 Напишите, что произошло, — бот напомнит, что сделать, и спросит срок:
-🔁 «Взяли в долг …» → не забудь вернуть
+🔁 «Взяли … у Москвы 2» → не забудь вернуть
 🚚 «Перемещение из …» → не забудь сделать перемещение
 📦 «Отдали … другой пиццерии» → не забудь забрать обратно
 

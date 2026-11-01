@@ -966,6 +966,8 @@ test("обмены: какие фразы что означают", async () => 
   const kind = (t) => detectExchange(t)?.kind ?? null;
   assert.equal(kind("Взяли в долг 5 кг сыра у Москвы 3"), "borrowed");
   assert.equal(kind("заняли коробки у соседей"), "borrowed");
+  assert.equal(kind("Взяли картошку и тесто Москва 2"), "borrowed");
+  assert.equal(kind("Отдали Москва 5 коробок и для пиццы"), "lent");
   assert.equal(kind("Перемещение сделали из другой пиццерии"), "transfer");
   assert.equal(kind("привезли из Москвы 5 тесто"), "transfer");
   assert.equal(kind("Отдали картофель на другой пиццерии"), "lent");
@@ -993,7 +995,7 @@ test("обмены: напоминание, срок кнопкой, повто�
   assert.match(first.params.text, /Взяли в долг[\s\S]*не забудь вернуть[\s\S]*Когда вернёте/);
   assert.equal(first.params.message_thread_id, 169);
   const kb = first.params.reply_markup.inline_keyboard.flat().map((b) => b.text);
-  assert.deepEqual(kb, ["Сегодня", "Завтра", "Через 3 дня", "Через неделю", "✅ Уже сделано"]);
+  assert.deepEqual(kb, ["Завтра", "Послезавтра", "Через 3 дня", "Через неделю", "✅ Уже сделано"]);
   let e = await DB.prepare("SELECT * FROM exchanges ORDER BY id DESC LIMIT 1").first();
   const h = hoursUntil(e.due_at);
   assert.ok(h > 0 && h < 48, "срок не выбран — напомнит завтра");
