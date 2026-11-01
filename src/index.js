@@ -43,6 +43,7 @@ function loadConfig(env) {
     geminiModel: String(env.GEMINI_MODEL || "gemini-flash-latest").trim(),
     repairTopic: parseTopicLink(env.REPAIR_TOPIC),
     exchangeTopic: parseTopicLink(env.EXCHANGE_TOPIC),
+    importantTopic: parseTopicLink(env.IMPORTANT_TOPIC),
     repairSystemUrl: String(env.REPAIR_SYSTEM_URL || "").trim(),
     // Через сколько часов каждое следующее напоминание; последнее значение повторяется
     repairScheduleHours: String(env.REPAIR_SCHEDULE_HOURS || "4,24,72,168")

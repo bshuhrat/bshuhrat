@@ -51,6 +51,15 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS repair_keywords (
     chat_id INTEGER NOT NULL, keyword TEXT NOT NULL, enabled INTEGER NOT NULL,
     PRIMARY KEY (chat_id, keyword))`,
+  // Важные сообщения: кто должен подтвердить прочтение
+  `CREATE TABLE IF NOT EXISTS important (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL, author_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL, next_at TEXT NOT NULL, bot_message_id INTEGER, remind_message_ids TEXT,
+    UNIQUE (chat_id, message_id))`,
+  `CREATE TABLE IF NOT EXISTS important_reads (
+    important_id INTEGER NOT NULL, user_id INTEGER NOT NULL, user_name TEXT NOT NULL, read_at TEXT,
+    PRIMARY KEY (important_id, user_id))`,
   // Обмены между пиццериями: долг, перемещение, отдали — напоминания по сроку
   `CREATE TABLE IF NOT EXISTS exchanges (
     id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
@@ -554,6 +563,68 @@ export class Database {
       `INSERT INTO repair_keywords (chat_id, keyword, enabled) VALUES (?, ?, ?)
        ON CONFLICT (chat_id, keyword) DO UPDATE SET enabled = excluded.enabled`,
       chatId, keyword, enabled ? 1 : 0,
+    );
+  }
+
+  // ---------- важные сообщения ----------
+  async createImportant({ chatId, threadId, messageId, authorId, nextAt, recipients }) {
+    const r = await this.run(
+      `INSERT OR IGNORE INTO important (chat_id, thread_id, message_id, author_id, created_at, next_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      chatId, threadId, messageId, authorId, nowIso(), nextAt,
+    );
+    if (!r.changes) return null;
+    for (const m of recipients) {
+      await this.run(
+        "INSERT OR IGNORE INTO important_reads (important_id, user_id, user_name) VALUES (?, ?, ?)",
+        r.lastId, m.user_id, m.full_name,
+      );
+    }
+    return r.lastId;
+  }
+
+  getImportant(id) {
+    return this.one("SELECT * FROM important WHERE id = ?", id);
+  }
+
+  setImportantBotMessage(id, messageId) {
+    return this.run("UPDATE important SET bot_message_id = ? WHERE id = ?", messageId, id);
+  }
+
+  setImportantNext(id, iso) {
+    return this.run("UPDATE important SET next_at = ? WHERE id = ?", iso, id);
+  }
+
+  addImportantRemind(id, messageId) {
+    return this.run(
+      `UPDATE important SET remind_message_ids = json_insert(COALESCE(remind_message_ids, '[]'), '$[#]', ?)
+       WHERE id = ?`,
+      messageId, id,
+    );
+  }
+
+  closeImportant(id, status) {
+    return this.run("UPDATE important SET status = ? WHERE id = ? AND status = 'open'", status, id);
+  }
+
+  importantReads(id) {
+    return this.all("SELECT * FROM important_reads WHERE important_id = ? ORDER BY user_name", id);
+  }
+
+  // Отметить прочтение; кого не было в списке (новый участник) — добавить. false — уже отмечал
+  async markImportantRead(id, userId, name) {
+    const r = await this.run(
+      `INSERT INTO important_reads (important_id, user_id, user_name, read_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (important_id, user_id) DO UPDATE SET read_at = excluded.read_at
+       WHERE important_reads.read_at IS NULL`,
+      id, userId, name, nowIso(),
+    );
+    return r.changes > 0;
+  }
+
+  dueImportant(nowIso_, limit) {
+    return this.all(
+      "SELECT * FROM important WHERE status = 'open' AND next_at <= ? ORDER BY next_at LIMIT ?", nowIso_, limit,
     );
   }
 

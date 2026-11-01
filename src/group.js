@@ -3,6 +3,7 @@ import { handleAdminReturn, handlePhoto, onFixButton, onReturnButton } from "./p
 import { handleAdminEdit } from "./adminedit.js";
 import { handleReportMessage } from "./reports.js";
 import { handleExchangeCommand, handleExchangeMessage, onExchangeButton } from "./exchanges.js";
+import { handleImportantMessage, onImportantButton } from "./important.js";
 import { handleRepairCommand, handleRepairMessage, onRepairButton } from "./repairs.js";
 import { acceptSubmission, closeTask, publishTask, registerRequest } from "./services.js";
 import { taskSummary } from "./stats.js";
@@ -97,6 +98,7 @@ export async function handleGroupMessage(ctx, msg) {
       return;
     }
   }
+  if (await handleImportantMessage(ctx, msg)) return;
   if (await handleExchangeMessage(ctx, msg)) return;
   if (await handleRepairMessage(ctx, msg)) return;
   if (await handlePhoto(ctx, msg)) return;
@@ -311,7 +313,9 @@ async function autoAnswer(ctx, msg) {
 
 export async function handleGroupCallback(ctx, call) {
   const [kind, id] = call.data.split(":");
-  if (kind === "ex") {
+  if (kind === "im") {
+    await onImportantButton(ctx, call);
+  } else if (kind === "ex") {
     await onExchangeButton(ctx, call);
   } else if (kind === "rp") {
     await onRepairButton(ctx, call);

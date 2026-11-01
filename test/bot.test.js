@@ -1065,3 +1065,102 @@ test("обмены: напоминание, срок кнопкой, повто�
   delete env.PHOTO_REMIND_FROM;
   delete env.PHOTO_REMIND_TO;
 });
+
+test("важные сообщения: какие слова ловятся", async () => {
+  const { isImportantText } = await import("../src/important.js");
+  for (const t of ["СРОЧНО всем!", "Важная информация по смене", "Внимание: завтра проверка", "‼️ Инвентаризация", "Обязательно к прочтению"]) {
+    assert.ok(isImportantText(t), t);
+  }
+  for (const t of ["Привет, как дела?", "Завтра обычная смена"]) assert.ok(!isImportantText(t), t);
+});
+
+test("важные сообщения: подтверждение прочтения и напоминания", async () => {
+  tgState.webhook = "https://bot.example.workers.dev/webhook";
+  env.IMPORTANT_TOPIC = "https://t.me/c/1/90";
+  env.PHOTO_REMIND_FROM = "00:00";
+  env.PHOTO_REMIND_TO = "23:59";
+  const T = { thread: 90 };
+  const past = "2020-01-01T00:00:00Z";
+  const hoursUntil = (iso) => (Date.parse(iso) - Date.now()) / 3_600_000;
+
+  let cs = await during(runCron);
+  assert.ok(cs.some((c) => /Тема важных сообщений/.test(c.params.text || "")), "закреп с подсказкой");
+
+  cs = await during(() => msg(ALI, "Обычное сообщение", T));
+  assert.equal(cs.filter((c) => /^send/.test(c.method)).length, 0);
+
+  // пересланное важное сообщение от админа
+  cs = await during(() => msg(ADM, "‼️ Срочно: завтра в 9:00 инвентаризация", { ...T, extra: { forward_origin: { type: "hidden_user", sender_user_name: "Офис", date: 0 } } }));
+  const header = one(cs, "sendMessage");
+  assert.match(header.params.text, /Важное сообщение — подтвердите[\s\S]*Прочитали: 0 из (\d+)/);
+  assert.equal(header.params.reply_markup.inline_keyboard[0][0].text, "✅ Прочитал(а)");
+  let item = await DB.prepare("SELECT * FROM important ORDER BY id DESC LIMIT 1").first();
+  const total = (await DB.prepare("SELECT COUNT(*) AS n FROM important_reads WHERE important_id = ?").bind(item.id).first()).n;
+  assert.ok(total >= 3, "все известные участники, кроме автора");
+  assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM important_reads WHERE important_id = ? AND user_id = 100").bind(item.id).first()).n, 0);
+  assert.ok(Math.abs(hoursUntil(item.next_at) - 2) < 0.1, "первое напоминание через 2 часа");
+  const headerMsg = { message_id: item.bot_message_id, date: 0, chat: G, text: "x" };
+
+  // Вали прочитал
+  cs = await during(() => press(VALI, `im:${item.id}:read`, headerMsg));
+  assert.match(one(cs, "answerCallbackQuery").params.text, /Спасибо/);
+  assert.match(one(cs, "editMessageText").params.text, new RegExp(`Прочитали: 1 из ${total}`));
+  cs = await during(() => press(VALI, `im:${item.id}:read`, headerMsg));
+  assert.match(one(cs, "answerCallbackQuery").params.text, /уже отметили/);
+  cs = await during(() => press(ADM, `im:${item.id}:read`, headerMsg));
+  assert.match(one(cs, "answerCallbackQuery").params.text, /автор/);
+
+  // через 2 часа — отмечает тех, кто не прочитал (без Вали и автора)
+  sqlite.prepare("UPDATE important SET next_at = ? WHERE id = ?").run(past, item.id);
+  cs = await during(runCron);
+  const remind = cs.find((c) => /Прочитайте важное сообщение/.test(c.params.text || ""));
+  assert.ok(remind);
+  assert.equal(remind.params.reply_parameters.message_id, item.message_id);
+  assert.match(remind.params.text, /tg:\/\/user\?id=1"[\s\S]*tg:\/\/user\?id=3"/);
+  assert.doesNotMatch(remind.params.text, /id=2"|id=100"/);
+  item = await DB.prepare("SELECT * FROM important WHERE id = ?").bind(item.id).first();
+  assert.ok(Math.abs(hoursUntil(item.next_at) - 4) < 0.1, "дальше каждые 4 часа");
+  const remindMsg = { message_id: JSON.parse(item.remind_message_ids)[0], date: 0, chat: G, text: "x" };
+
+  // Сами прочитал — исчезает из напоминания
+  cs = await during(() => press(SAMI, `im:${item.id}:read`, remindMsg));
+  const updated = cs.filter((c) => c.method === "editMessageText").find((c) => c.params.message_id === remindMsg.message_id);
+  assert.doesNotMatch(updated.params.text, /id=3"/);
+  assert.match(updated.params.text, /id=1"/);
+
+  // ещё одно напоминание через 4 часа
+  sqlite.prepare("UPDATE important SET next_at = ? WHERE id = ?").run(past, item.id);
+  await runCron();
+  item = await DB.prepare("SELECT * FROM important WHERE id = ?").bind(item.id).first();
+  const reminders = JSON.parse(item.remind_message_ids);
+  assert.equal(reminders.length, 2);
+
+  // все остальные прочитали — напоминания удаляются
+  const rest = (await DB.prepare("SELECT user_id, user_name FROM important_reads WHERE important_id = ? AND read_at IS NULL").bind(item.id).all()).results;
+  for (const u of rest.slice(0, -1)) await press({ id: u.user_id, is_bot: false, first_name: u.user_name }, `im:${item.id}:read`, headerMsg);
+  const lastUser = rest.at(-1);
+  cs = await during(() => press({ id: lastUser.user_id, is_bot: false, first_name: lastUser.user_name }, `im:${item.id}:read`, headerMsg));
+  const deleted = cs.filter((c) => c.method === "deleteMessage").map((c) => c.params.message_id).sort((a, b) => a - b);
+  assert.deepEqual(deleted, reminders, "все напоминания удалены");
+  assert.ok(cs.some((c) => c.method === "editMessageText" && /Все прочитали/.test(c.params.text)));
+  sqlite.prepare("UPDATE important SET next_at = ? WHERE id = ?").run(past, item.id);
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => /Прочитайте важное/.test(c.params.text || "")).length, 0);
+
+  // админ удалил сообщение бота — напоминаний нет
+  await msg(ADM, "Важно: новые правила выдачи", T);
+  const item2 = await DB.prepare("SELECT * FROM important ORDER BY id DESC LIMIT 1").first();
+  tgState.deleted.add(item2.bot_message_id);
+  sqlite.prepare("UPDATE important SET next_at = ? WHERE id = ?").run(past, item2.id);
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => /Прочитайте важное/.test(c.params.text || "")).length, 0);
+  assert.equal((await DB.prepare("SELECT status FROM important WHERE id = ?").bind(item2.id).first()).status, "cancelled");
+  tgState.deleted.clear();
+
+  // в других темах — не реагирует
+  cs = await during(() => msg(ADM, "Срочно!", { thread: 5 }));
+  assert.equal(cs.filter((c) => /Важное сообщение/.test(c.params.text || "")).length, 0);
+  delete env.IMPORTANT_TOPIC;
+  delete env.PHOTO_REMIND_FROM;
+  delete env.PHOTO_REMIND_TO;
+});
