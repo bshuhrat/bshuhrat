@@ -42,6 +42,7 @@ function loadConfig(env) {
     geminiKey: String(env.GEMINI_API_KEY || "").trim(),
     geminiModel: String(env.GEMINI_MODEL || "gemini-flash-latest").trim(),
     repairTopic: parseTopicLink(env.REPAIR_TOPIC),
+    exchangeTopic: parseTopicLink(env.EXCHANGE_TOPIC),
     repairSystemUrl: String(env.REPAIR_SYSTEM_URL || "").trim(),
     // Через сколько часов каждое следующее напоминание; последнее значение повторяется
     repairScheduleHours: String(env.REPAIR_SCHEDULE_HOURS || "4,24,72,168")
@@ -81,7 +82,7 @@ async function handleUpdate(ctx, update) {
 }
 
 const GROUP_COMMANDS = [
-  ["zayavki", "Незакрытые поломки (тема «Заявки»)"], ["kw", "Слова, на которые реагирует бот (тема «Заявки»)"],
+  ["zayavki", "Незакрытые поломки (тема «Заявки»)"], ["dolgi", "Что не вернули / не оформили (тема обменов)"], ["kw", "Слова, на которые реагирует бот (тема «Заявки»)"],
   ["tasks", "Открытые задания темы"], ["info", "Описание темы"], ["faq", "Частые вопросы"],
   ["ask", "Вопрос администратору"], ["my", "Моя статистика"], ["help", "Помощь"],
 ];
@@ -92,7 +93,7 @@ const ADMIN_GROUP_COMMANDS = [
   ["normy_set", "Нормы для разбора отчётов"], ["tochka_set", "Точка для разбора отчётов"],
 ];
 // Меняется при изменении списков команд — тогда бот сам обновит меню после деплоя
-const COMMANDS_VERSION = "2";
+const COMMANDS_VERSION = "3";
 
 const PRIVATE_COMMANDS = [
   ["stats", "Общая статистика"], ["pending", "Работы на проверке"], ["requests", "Вопросы участников"],

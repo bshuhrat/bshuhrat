@@ -51,6 +51,13 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS repair_keywords (
     chat_id INTEGER NOT NULL, keyword TEXT NOT NULL, enabled INTEGER NOT NULL,
     PRIMARY KEY (chat_id, keyword))`,
+  // Обмены между пиццериями: долг, перемещение, отдали — напоминания по сроку
+  `CREATE TABLE IF NOT EXISTS exchanges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL, user_id INTEGER NOT NULL, user_name TEXT NOT NULL, text TEXT NOT NULL,
+    kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', -- open | done | cancelled
+    created_at TEXT NOT NULL, due_at TEXT NOT NULL, bot_message_id INTEGER, remind_message_ids TEXT,
+    closed_by_id INTEGER, closed_by_name TEXT, closed_at TEXT, UNIQUE (chat_id, message_id))`,
   // Очередь разбора отчётов ИИ
   `CREATE TABLE IF NOT EXISTS report_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
@@ -547,6 +554,65 @@ export class Database {
       `INSERT INTO repair_keywords (chat_id, keyword, enabled) VALUES (?, ?, ?)
        ON CONFLICT (chat_id, keyword) DO UPDATE SET enabled = excluded.enabled`,
       chatId, keyword, enabled ? 1 : 0,
+    );
+  }
+
+  // ---------- обмены между пиццериями ----------
+  async createExchange({ chatId, threadId, messageId, userId, userName, text, kind, dueAt }) {
+    const r = await this.run(
+      `INSERT OR IGNORE INTO exchanges (chat_id, thread_id, message_id, user_id, user_name, text, kind,
+       created_at, due_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      chatId, threadId, messageId, userId, userName, text, kind, nowIso(), dueAt,
+    );
+    return r.changes > 0 ? r.lastId : null;
+  }
+
+  getExchange(id) {
+    return this.one("SELECT * FROM exchanges WHERE id = ?", id);
+  }
+
+  setExchangeBotMessage(id, messageId) {
+    return this.run("UPDATE exchanges SET bot_message_id = ? WHERE id = ?", messageId, id);
+  }
+
+  setExchangeDue(id, iso) {
+    return this.run("UPDATE exchanges SET due_at = ? WHERE id = ?", iso, id);
+  }
+
+  addExchangeRemind(id, messageId) {
+    return this.run(
+      `UPDATE exchanges SET remind_message_ids = json_insert(COALESCE(remind_message_ids, '[]'), '$[#]', ?)
+       WHERE id = ?`,
+      messageId, id,
+    );
+  }
+
+  // Атомарно закрывает открытую запись. false — уже закрыта
+  async closeExchange(id, status, byId, byName) {
+    const r = await this.run(
+      `UPDATE exchanges SET status = ?, closed_by_id = ?, closed_by_name = ?, closed_at = ?
+       WHERE id = ? AND status = 'open'`,
+      status, byId, byName, nowIso(), id,
+    );
+    return r.changes > 0;
+  }
+
+  exchangeByAnyMessage(chatId, messageId) {
+    return this.one(
+      `SELECT * FROM exchanges WHERE chat_id = ? AND (message_id = ? OR bot_message_id = ?
+       OR EXISTS (SELECT 1 FROM json_each(COALESCE(remind_message_ids, '[]')) WHERE value = ?))
+       ORDER BY id DESC LIMIT 1`,
+      chatId, messageId, messageId, messageId,
+    );
+  }
+
+  openExchanges(chatId) {
+    return this.all("SELECT * FROM exchanges WHERE chat_id = ? AND status = 'open' ORDER BY due_at", chatId);
+  }
+
+  dueExchanges(nowIso_, limit) {
+    return this.all(
+      "SELECT * FROM exchanges WHERE status = 'open' AND due_at <= ? ORDER BY due_at LIMIT ?", nowIso_, limit,
     );
   }
 

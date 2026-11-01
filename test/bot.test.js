@@ -960,3 +960,106 @@ test("тема «Заявки»: закреп с командами и меню 
   assert.equal(texts(cs).length, 0, "обычный участник — нет");
   delete env.REPAIR_TOPIC;
 });
+
+test("обмены: какие фразы что означают", async () => {
+  const { detectExchange } = await import("../src/exchanges.js");
+  const kind = (t) => detectExchange(t)?.kind ?? null;
+  assert.equal(kind("Взяли в долг 5 кг сыра у Москвы 3"), "borrowed");
+  assert.equal(kind("заняли коробки у соседей"), "borrowed");
+  assert.equal(kind("Перемещение сделали из другой пиццерии"), "transfer");
+  assert.equal(kind("привезли из Москвы 5 тесто"), "transfer");
+  assert.equal(kind("Отдали картофель на другой пиццерии"), "lent");
+  assert.equal(kind("дали в долг Москве 2 соус"), "lent");
+  assert.equal(kind("Всё хорошо, смена закрыта"), null);
+  assert.equal(kind("вернули долг Москве 3"), null);
+});
+
+test("обмены: напоминание, срок кнопкой, повтор, «Сделано», удаление админом", async () => {
+  tgState.webhook = "https://bot.example.workers.dev/webhook";
+  env.EXCHANGE_TOPIC = "https://t.me/c/1/169";
+  env.PHOTO_REMIND_FROM = "00:00";
+  env.PHOTO_REMIND_TO = "23:59";
+  const T = { thread: 169 };
+  const past = "2020-01-01T00:00:00Z";
+  const hoursUntil = (iso) => (Date.parse(iso) - Date.now()) / 3_600_000;
+
+  // закреп с подсказкой
+  let cs = await during(runCron);
+  assert.ok(cs.some((c) => /Тема обменов между пиццериями/.test(c.params.text || "")));
+
+  // «взяли в долг» → бот просит вернуть и спрашивает срок
+  cs = await during(() => msg(ALI, "Взяли в долг 5 кг сыра у Москвы 3", T));
+  const first = one(cs, "sendMessage");
+  assert.match(first.params.text, /Взяли в долг[\s\S]*не забудь вернуть[\s\S]*Когда вернёте/);
+  assert.equal(first.params.message_thread_id, 169);
+  const kb = first.params.reply_markup.inline_keyboard.flat().map((b) => b.text);
+  assert.deepEqual(kb, ["Сегодня", "Завтра", "Через 3 дня", "Через неделю", "✅ Уже сделано"]);
+  let e = await DB.prepare("SELECT * FROM exchanges ORDER BY id DESC LIMIT 1").first();
+  const h = hoursUntil(e.due_at);
+  assert.ok(h > 0 && h < 48, "срок не выбран — напомнит завтра");
+  const firstMsg = { message_id: e.bot_message_id, date: 0, chat: G, text: "x" };
+
+  // выбрали «через 3 дня»
+  cs = await during(() => press(VALI, `ex:${e.id}:d3`, firstMsg));
+  e = await DB.prepare("SELECT * FROM exchanges WHERE id = ?").bind(e.id).first();
+  assert.ok(hoursUntil(e.due_at) > 48 && hoursUntil(e.due_at) < 96, "срок через 3 дня");
+  assert.match(one(cs, "editMessageText").params.text, /Срок: [\s\S]*12:00[\s\S]*Vali/);
+
+  // ответы в обсуждении новую запись не создают
+  cs = await during(() => msg(VALI, "в долг брали только сыр", { ...T, reply: { message_id: e.message_id, date: 0, chat: G, text: "x" } }));
+  assert.equal(cs.filter((c) => /^send/.test(c.method)).length, 0);
+
+  // срок наступил — напоминание
+  sqlite.prepare("UPDATE exchanges SET due_at = ? WHERE id = ?").run(past, e.id);
+  cs = await during(runCron);
+  const remind = cs.find((c) => /Срок: вернуть!/.test(c.params.text || ""));
+  assert.ok(remind);
+  assert.equal(remind.params.reply_parameters.message_id, e.message_id);
+  e = await DB.prepare("SELECT * FROM exchanges WHERE id = ?").bind(e.id).first();
+  assert.ok(hoursUntil(e.due_at) > 0 && hoursUntil(e.due_at) < 48, "без ответа — завтра снова");
+
+  // ещё раз без ответа
+  sqlite.prepare("UPDATE exchanges SET due_at = ? WHERE id = ?").run(past, e.id);
+  await runCron();
+  e = await DB.prepare("SELECT * FROM exchanges WHERE id = ?").bind(e.id).first();
+  const reminders = JSON.parse(e.remind_message_ids);
+  assert.equal(reminders.length, 2);
+  const lastRemind = { message_id: reminders[1], date: 0, chat: G, text: "x" };
+
+  // «Сделано» — с подтверждением тем же человеком
+  await press(SAMI, `ex:${e.id}:done`, lastRemind);
+  cs = await during(() => press(ALI, `ex:${e.id}:done!:3`, lastRemind));
+  assert.match(one(cs, "answerCallbackQuery").params.text, /только тот, кто нажал/);
+  cs = await during(() => press(SAMI, `ex:${e.id}:done!:3`, lastRemind));
+  const deleted = cs.filter((c) => c.method === "deleteMessage").map((c) => c.params.message_id).sort((a, b) => a - b);
+  assert.deepEqual(deleted, reminders, "напоминания удалены");
+  const done = one(cs, "editMessageText");
+  assert.equal(done.params.message_id, e.bot_message_id);
+  assert.match(done.params.text, /вернуть — сделано[\s\S]*Sami/);
+  sqlite.prepare("UPDATE exchanges SET due_at = ? WHERE id = ?").run(past, e.id);
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => /Срок: вернуть/.test(c.params.text || "")).length, 0, "закрытые не напоминаются");
+
+  // «отдали» → забрать обратно; список /dolgi
+  await msg(ALI, "Отдали картофель на другой пиццерии", T);
+  cs = await during(() => msg(SAMI, "/dolgi", T));
+  assert.match(texts(cs)[0], /Не закрыто \(1\)[\s\S]*картофель[\s\S]*забрать обратно/);
+
+  // админ удалил сообщение бота — напоминаний больше нет
+  let e2 = await DB.prepare("SELECT * FROM exchanges ORDER BY id DESC LIMIT 1").first();
+  tgState.deleted.add(e2.bot_message_id);
+  sqlite.prepare("UPDATE exchanges SET due_at = ? WHERE id = ?").run(past, e2.id);
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => /Срок: забрать обратно/.test(c.params.text || "")).length, 0);
+  e2 = await DB.prepare("SELECT status FROM exchanges WHERE id = ?").bind(e2.id).first();
+  assert.equal(e2.status, "cancelled");
+  tgState.deleted.clear();
+
+  // в других темах бот на такие слова не реагирует
+  cs = await during(() => msg(ALI, "взяли в долг соус", { thread: 5 }));
+  assert.equal(texts(cs).filter((t) => /не забудь/.test(t)).length, 0);
+
+  delete env.EXCHANGE_TOPIC;
+  delete env.PHOTO_REMIND_FROM;
+  delete env.PHOTO_REMIND_TO;
+});

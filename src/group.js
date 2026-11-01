@@ -2,6 +2,7 @@
 import { handleAdminReturn, handlePhoto, onFixButton, onReturnButton } from "./photofix.js";
 import { handleAdminEdit } from "./adminedit.js";
 import { handleReportMessage } from "./reports.js";
+import { handleExchangeCommand, handleExchangeMessage, onExchangeButton } from "./exchanges.js";
 import { handleRepairCommand, handleRepairMessage, onRepairButton } from "./repairs.js";
 import { acceptSubmission, closeTask, publishTask, registerRequest } from "./services.js";
 import { taskSummary } from "./stats.js";
@@ -96,6 +97,7 @@ export async function handleGroupMessage(ctx, msg) {
       return;
     }
   }
+  if (await handleExchangeMessage(ctx, msg)) return;
   if (await handleRepairMessage(ctx, msg)) return;
   if (await handlePhoto(ctx, msg)) return;
   await autoAnswer(ctx, msg);
@@ -108,6 +110,7 @@ async function handleCommand(ctx, msg, { cmd, args }) {
   const admin = isAdmin(ctx, msg.from);
 
   if (await handleRepairCommand(ctx, msg, cmd, args, admin)) return;
+  if (await handleExchangeCommand(ctx, msg, cmd)) return;
 
   switch (cmd) {
     case "help":
@@ -308,7 +311,9 @@ async function autoAnswer(ctx, msg) {
 
 export async function handleGroupCallback(ctx, call) {
   const [kind, id] = call.data.split(":");
-  if (kind === "rp") {
+  if (kind === "ex") {
+    await onExchangeButton(ctx, call);
+  } else if (kind === "rp") {
     await onRepairButton(ctx, call);
   } else if (kind === "fix") {
     await onFixButton(ctx, call);
