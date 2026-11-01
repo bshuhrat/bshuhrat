@@ -1,5 +1,6 @@
 // Тема поломок: бот замечает сообщения о поломках, просит оформить заявку во внешней системе
 // и потом уточняет статус — через 48 ч, затем каждые 7 дней, пока не ответят «починили».
+import { isChatAdmin } from "./photofix.js";
 import { esc, fullName, localParts, mention, threadOf } from "./utils.js";
 
 // Начала слов и фраз о поломках в пиццерии: «слома» ловит «сломалась», «сломался», «сломали»…
@@ -273,7 +274,8 @@ export async function handleRepairCommand(ctx, msg, cmd, args, admin) {
     return true;
   }
 
-  if ((cmd === "kw_add" || cmd === "kw_del") && admin) {
+  // Слова меняют админы бота (ADMIN_IDS) и администраторы группы
+  if ((cmd === "kw_add" || cmd === "kw_del") && (admin || await isChatAdmin(ctx, chatId, msg.from.id))) {
     const kw = norm(args).trim();
     if (!kw) {
       await tg.reply(msg, `Использование: <code>/${cmd} не работает</code>`);
@@ -314,4 +316,29 @@ export async function checkRepairs(ctx) {
       { thread: r.thread_id, replyTo: r.message_id }, checkKeyboard(r.id));
     if (sent) await ctx.db.setRepairCheckMessage(r.id, sent.message_id);
   }
+}
+
+// ---------- закреп с подсказкой в теме поломок ----------
+
+const HELP_TEXT = `📌 <b>Тема «Заявки» — как работает бот</b>
+
+🛠 Напишите о поломке — бот попросит оформить заявку и потом уточнит, починили ли.
+
+/zayavki — незакрытые поломки
+/kw — слова, на которые реагирует бот
+
+👮 Для админов:
+/kw_add <i>слово</i> — добавить слово
+/kw_del <i>слово</i> — убрать слово`;
+
+// Один раз публикует и закрепляет в теме подсказку с командами (закреп виден при открытии темы)
+export async function ensureRepairHelp(ctx) {
+  const t = ctx.cfg.repairTopic;
+  if (!t) return;
+  const key = `repair_help:${t.chatId}:${t.threadId}`;
+  if (await ctx.db.getSetting(key)) return;
+  const sent = await ctx.tg.send(t.chatId, HELP_TEXT, { thread: t.threadId });
+  if (!sent) return; // попробуем на следующем запуске
+  await ctx.db.setSetting(key, String(sent.message_id));
+  await ctx.tg.safe("pinChatMessage", { chat_id: t.chatId, message_id: sent.message_id, disable_notification: true });
 }

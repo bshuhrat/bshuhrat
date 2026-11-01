@@ -1,6 +1,7 @@
 // Разбор отчётов по фото: бесплатные ИИ-модели (Gemini и Cloudflare Workers AI) читают
 // показатели и пишут менеджеру, что не так, почему и что сделать. Работа идёт в фоне через планировщик,
 // потому что ответ ИИ может занимать дольше, чем Telegram ждёт ответа на вебхук.
+import { isChatAdmin } from "./photofix.js";
 import { esc, fullName, parseCommand, threadOf } from "./utils.js";
 
 // Бесплатные модели Workers AI с поддержкой картинок (Kimi на бесплатном тарифе недоступен).
@@ -107,7 +108,7 @@ export async function handleReportMessage(ctx, msg) {
     return true;
   }
   if (command?.cmd === "normy_set") {
-    if (!ctx.cfg.adminIds.has(msg.from.id)) return true;
+    if (!(await isChatAdmin(ctx, chatId, msg.from.id))) return true;
     await ctx.db.setSetting(normsKey(chatId), command.args);
     await ctx.tg.reply(msg, command.args ? "✅ Нормы сохранены." : "Нормы очищены.");
     return true;
@@ -122,7 +123,7 @@ export async function handleReportMessage(ctx, msg) {
     return true;
   }
   if (command?.cmd === "tochka_set") {
-    if (!ctx.cfg.adminIds.has(msg.from.id)) return true;
+    if (!(await isChatAdmin(ctx, chatId, msg.from.id))) return true;
     await ctx.db.setSetting(locationKey(chatId), command.args);
     await ctx.tg.reply(msg, command.args ? `✅ Теперь отчёты разбираются по точке «${esc(command.args)}».` : "Точка по умолчанию очищена.");
     return true;

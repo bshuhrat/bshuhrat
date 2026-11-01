@@ -929,3 +929,34 @@ test("админ исправляет любой текст бота ответ�
   cs = await during(() => msg(ADM, "исправить что-то", { ...T, reply: { message_id: 5, date: 0, chat: G, from: ALI, text: "x" } }));
   assert.equal(cs.filter((c) => /^edit/.test(c.method)).length, 0);
 });
+
+test("тема «Заявки»: закреп с командами и меню команд", async () => {
+  env.REPAIR_TOPIC = "https://t.me/c/1/91";
+  sqlite.prepare("DELETE FROM settings WHERE key LIKE 'repair_help:%'").run(); // прошлые тесты уже закрепили
+  let cs = await during(runCron);
+  const help = cs.find((c) => c.method === "sendMessage" && /Тема «Заявки» — как работает бот/.test(c.params.text));
+  assert.ok(help);
+  assert.equal(help.params.message_thread_id, 91);
+  assert.match(help.params.text, /\/zayavki[\s\S]*\/kw —[\s\S]*\/kw_add/);
+  const pin = one(cs, "pinChatMessage");
+  assert.equal(pin.params.disable_notification, true);
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => /как работает бот/.test(c.params.text || "")).length, 0, "закреп публикуется один раз");
+
+  // меню команд обновляется само после деплоя: участникам — /kw, админам — ещё /kw_add
+  sqlite.prepare("DELETE FROM settings WHERE key = 'commands_version'").run();
+  cs = await during(runCron);
+  const menus = cs.filter((c) => c.method === "setMyCommands");
+  const scope = (t) => menus.find((m) => m.params.scope.type === t).params.commands.map((c) => c.command);
+  assert.ok(scope("all_group_chats").includes("kw") && !scope("all_group_chats").includes("kw_add"));
+  assert.ok(scope("all_chat_administrators").includes("kw_add"));
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => c.method === "setMyCommands").length, 0, "меню обновляется один раз");
+
+  // админ группы (не из ADMIN_IDS) меняет слова
+  cs = await during(() => msg(GADM, "/kw_add не тянет", { thread: 91 }));
+  assert.match(texts(cs)[0], /реагирует на «не тянет»/);
+  cs = await during(() => msg(SAMI, "/kw_add взлом", { thread: 91 }));
+  assert.equal(texts(cs).length, 0, "обычный участник — нет");
+  delete env.REPAIR_TOPIC;
+});

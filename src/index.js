@@ -81,9 +81,19 @@ async function handleUpdate(ctx, update) {
 }
 
 const GROUP_COMMANDS = [
+  ["zayavki", "Незакрытые поломки (тема «Заявки»)"], ["kw", "Слова, на которые реагирует бот (тема «Заявки»)"],
   ["tasks", "Открытые задания темы"], ["info", "Описание темы"], ["faq", "Частые вопросы"],
   ["ask", "Вопрос администратору"], ["my", "Моя статистика"], ["help", "Помощь"],
 ];
+// Админам группы меню показывает ещё и команды настройки
+const ADMIN_GROUP_COMMANDS = [
+  ...GROUP_COMMANDS,
+  ["kw_add", "Добавить слово для поломок"], ["kw_del", "Убрать слово для поломок"],
+  ["normy_set", "Нормы для разбора отчётов"], ["tochka_set", "Точка для разбора отчётов"],
+];
+// Меняется при изменении списков команд — тогда бот сам обновит меню после деплоя
+const COMMANDS_VERSION = "2";
+
 const PRIVATE_COMMANDS = [
   ["stats", "Общая статистика"], ["pending", "Работы на проверке"], ["requests", "Вопросы участников"],
   ["export", "Выгрузка в CSV"], ["help", "Помощь"],
@@ -101,12 +111,7 @@ async function setup(env, origin) {
     allowed_updates: ["message", "callback_query"],
     drop_pending_updates: true,
   });
-  await ctx.tg.call("setMyCommands", {
-    commands: toCommands(GROUP_COMMANDS), scope: { type: "all_group_chats" },
-  });
-  await ctx.tg.call("setMyCommands", {
-    commands: toCommands(PRIVATE_COMMANDS), scope: { type: "all_private_chats" },
-  });
+  await setCommands(ctx);
   const admins = [...ctx.cfg.adminIds].join(", ") ||
     "не указаны — напишите боту /start, он пришлёт ваш ID, и впишите его в ADMIN_IDS";
   return `✅ Бот @${me.username} подключён.\nАдминистраторы: ${admins}\n` +
@@ -116,6 +121,26 @@ async function setup(env, origin) {
 // Автоподключение без браузера: если задана переменная WORKER_URL, планировщик
 // сам регистрирует вебхук (полезно, когда workers.dev не открывается у провайдера).
 // Итог сохраняется в setup_status — бот показывает его в ответ на /start.
+async function setCommands(ctx) {
+  await ctx.tg.call("setMyCommands", {
+    commands: toCommands(GROUP_COMMANDS), scope: { type: "all_group_chats" },
+  });
+  await ctx.tg.call("setMyCommands", {
+    commands: toCommands(ADMIN_GROUP_COMMANDS), scope: { type: "all_chat_administrators" },
+  });
+  await ctx.tg.call("setMyCommands", {
+    commands: toCommands(PRIVATE_COMMANDS), scope: { type: "all_private_chats" },
+  });
+  await ctx.db.setSetting("commands_version", COMMANDS_VERSION);
+}
+
+// После деплоя с новыми командами обновляем меню (без повторной настройки вебхука)
+async function syncCommands(env) {
+  if (!tokenOf(env)) return;
+  const ctx = await makeContext(env);
+  if ((await ctx.db.getSetting("commands_version")) !== COMMANDS_VERSION) await setCommands(ctx);
+}
+
 async function autoSetup(env) {
   const db = new Database(env.DB);
   await db.init();
@@ -203,7 +228,7 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
-      for (const step of [autoSetup, pollUpdates]) {
+      for (const step of [autoSetup, syncCommands, pollUpdates]) {
         try {
           await step(env);
         } catch (e) {
