@@ -1,5 +1,6 @@
 // Обработчики в групповом чате: темы, автоответы, задания, сдачи, запросы, фото.
 import { handleAdminReturn, handlePhoto, onFixButton, onReturnButton } from "./photofix.js";
+import { handleAdminEdit } from "./adminedit.js";
 import { handleReportMessage } from "./reports.js";
 import { handleRepairCommand, handleRepairMessage, onRepairButton } from "./repairs.js";
 import { acceptSubmission, closeTask, publishTask, registerRequest } from "./services.js";
@@ -37,6 +38,7 @@ const HELP_ADMIN = `
 В теме поломок: <code>/kw_add слово</code> / <code>/kw_del слово</code> — слова, на которые бот реагирует
 <code>/normy_set доставка до 30 мин; списания до 2%</code> — нормы для разбора отчётов ИИ
 <code>/tochka_set Москва 8</code> — точка, по которой ИИ разбирает отчёты
+Исправить любой текст бота — ответьте на его сообщение: <code>исправить</code> и новый текст (форматирование и кнопки сохранятся)
 /close <i>id</i> — закрыть задание и получить итог
 /stat <i>id</i> — итог по заданию (придёт в личку)`;
 
@@ -75,6 +77,8 @@ export async function handleGroupMessage(ctx, msg) {
 
   // Админ ответил на альбом с исправлением словом «вернуть»
   if (await handleAdminReturn(ctx, msg)) return;
+  // Админ исправляет текст бота: ответ на сообщение бота «исправить <новый текст>»
+  if (await handleAdminEdit(ctx, msg)) return;
   // Разбор отчёта ИИ: «разбор» в ответ на фото, фото в теме отчётов, команды норм
   if (await handleReportMessage(ctx, msg)) return;
 

@@ -2,7 +2,7 @@
 import { handleAdminCallback, handlePrivateMessage } from "./admin.js";
 import { Database } from "./db.js";
 import { handleGroupCallback, handleGroupMessage } from "./group.js";
-import { DEFAULT_AI_MODEL } from "./reports.js";
+import { DEFAULT_AI_MODELS } from "./reports.js";
 import { runScheduled } from "./scheduler.js";
 import { Telegram } from "./telegram.js";
 import { parseTopicLink } from "./utils.js";
@@ -34,7 +34,11 @@ function loadConfig(env) {
     photoTopic: parseTopicLink(env.PHOTO_TOPIC),
     reportTopic: parseTopicLink(env.REPORT_TOPIC),
     reportLocation: String(env.REPORT_LOCATION || "").trim(),
-    aiModel: String(env.AI_MODEL || DEFAULT_AI_MODEL).trim(),
+    // AI_MODEL — модель, которую пробовать первой; AI_MODELS — весь список через запятую
+    aiModels: [...new Set([
+      ...String(env.AI_MODEL || "").split(","),
+      ...(env.AI_MODELS ? String(env.AI_MODELS).split(",") : DEFAULT_AI_MODELS),
+    ].map((m) => m.trim()).filter(Boolean))],
     geminiKey: String(env.GEMINI_API_KEY || "").trim(),
     geminiModel: String(env.GEMINI_MODEL || "gemini-flash-latest").trim(),
     repairTopic: parseTopicLink(env.REPAIR_TOPIC),

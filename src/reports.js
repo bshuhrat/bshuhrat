@@ -1,15 +1,21 @@
-// Разбор отчётов по фото: ИИ (Kimi в Cloudflare Workers AI, бесплатный дневной лимит) читает
-// показатели и пишет, где молодцы и что улучшить. Работа идёт в фоне через планировщик,
+// Разбор отчётов по фото: бесплатные ИИ-модели (Gemini и Cloudflare Workers AI) читают
+// показатели и пишут менеджеру, что не так, почему и что сделать. Работа идёт в фоне через планировщик,
 // потому что ответ ИИ может занимать дольше, чем Telegram ждёт ответа на вебхук.
-import { esc, fullName, mention, parseCommand, threadOf } from "./utils.js";
+import { esc, fullName, parseCommand, threadOf } from "./utils.js";
 
-export const DEFAULT_AI_MODEL = "@cf/moonshotai/kimi-k2.6";
-// Другие бесплатные модели Workers AI с поддержкой картинок — участвуют в выборе лучшего ответа
-const FALLBACK_MODELS = ["@cf/meta/llama-4-scout-17b-16e-instruct"];
+// Бесплатные модели Workers AI с поддержкой картинок (Kimi на бесплатном тарифе недоступен).
+// Список можно заменить переменной AI_MODELS (через запятую).
+export const DEFAULT_AI_MODELS = [
+  "@cf/meta/llama-4-scout-17b-16e-instruct",
+  "@cf/mistralai/mistral-small-3.1-24b-instruct",
+  "@cf/google/gemma-3-12b-it",
+];
 const MODEL_NAMES = {
   "@cf/moonshotai/kimi-k2.6": "Kimi K2.6",
   "@cf/moonshotai/kimi-k2.5": "Kimi K2.5",
   "@cf/meta/llama-4-scout-17b-16e-instruct": "Llama 4 Scout",
+  "@cf/mistralai/mistral-small-3.1-24b-instruct": "Mistral Small 3.1",
+  "@cf/google/gemma-3-12b-it": "Gemma 3",
 };
 const modelName = (m) => MODEL_NAMES[m] || m.split("/").pop();
 const JOBS_PER_RUN = 2;
@@ -18,50 +24,46 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 // «разбор», «разбор Москва 8», «/razbor Москва 3»
 const TRIGGER_RE = /^\s*(?:\/(?:razbor|report)(?:@\w+)?|разбор|разбери)(?:\s+(.+?))?\s*$/iu;
 
-const SYSTEM_PROMPT = `Ты — операционный директор Додо Пиццы. Тебе прислали операционный отчёт (таблицу) сети пиццерий. Твоя задача — коротко объяснить менеджеру одной пиццерии, что у него не так, почему, и что ему сделать.
+const SYSTEM_PROMPT = `Ты — операционный директор Додо Пиццы. Тебе прислали операционный отчёт (таблицу) сети пиццерий. Объясни менеджеру одной пиццерии: что не так, почему и что ему сделать.
 
 Как читать таблицу:
 — Строки — пиццерии («Москва - 8» и т.п.). Если у точки есть строка «Итог» и строки по ресторанам — бери «Итог».
-— Последняя строка «Сеть» — показатели всей сети. Сравнивай с ней только средние и доли (производительность, проценты, время, рейтинг). Выручку и количества с «Сетью» НЕ сравнивай: там сумма по всем точкам.
+— Последняя строка «Сеть» — показатели всей сети. Сравнивай с ней только средние и доли (производительность, проценты, время, рейтинг). Выручку и количества с «Сетью» не сравнивай: там сумма по всем точкам.
 — Бери только числа, которые видишь. Не выдумывай.
 
-Как искать причины (связывай показатели между собой):
-— Низкая производительность кухни (продуктов на человека в час) при нормальной выручке → на смене больше людей, чем нужно.
-— Низкая производительность курьеров (заказов в час) + много поездок с одним заказом → курьеров больше, чем заказов, возят по одному.
-— Долгая доставка, много доставок дольше 40 минут, сертификаты за опоздание, при том что курьеров много → заказы ждут кухню или курьеров отправляют поздно/по одному.
-— Долгое приготовление, заказы в ресторане дольше 13 минут → кухня не успевает: неправильная расстановка по станциям или мало заготовок.
-— Время в стопе и упущенная выручка → закончились ингредиенты или заготовки: остатки и заказ поставки проверяют плохо.
+Что хорошо, а что плохо (проверяй каждый показатель перед тем, как писать):
+— Больше = лучше: выручка, производительность кухни, производительность курьеров, рейтинг.
+— Меньше = лучше: время доставки и приготовления, доли долгих заказов и опозданий, сертификаты за опоздание, время в стопе, упущенная выручка, доля поездок с одним заказом.
+— Показатель лучше сети — в «Хорошо». Хуже сети — проблема. Не называй проблемой то, что лучше сети.
+
+Подсказки, как связывать показатели (это не готовые ответы — выводы делай по цифрам этой точки):
+— низкая производительность кухни при обычной выручке → на смене больше людей, чем нужно;
+— низкая производительность курьеров и много поездок с одним заказом → курьеров больше, чем заказов, возят по одному;
+— долгая доставка и сертификаты за опоздание при большом числе курьеров → заказы ждут кухню или курьеров отправляют поздно;
+— долгое приготовление → не та расстановка по станциям или мало заготовок;
+— стопы и упущенная выручка → закончились ингредиенты или заготовки.
 
 Как писать:
-— Очень коротко. Без вступлений и общих слов.
-— ЗАПРЕЩЕНЫ слова: «проанализировать», «оптимизировать», «улучшить», «внедрить», «рассмотреть», «повысить эффективность», «переобучить персонал». Вместо них — конкретное действие менеджера.
-— Действия — только то, что менеджер делает сам: график и число людей на смене, расстановка по станциям, отправка курьеров (по 2 заказа в один район), заготовки и остатки до пика, заказ поставки, стоп-лист, пятиминутка с командой.
-— У действия — когда: «сегодня», «на ближайшей смене», «до конца недели».
-— Максимум 3 проблемы, самые важные. Пиши обычным текстом с эмодзи, без Markdown (никаких *, #, таблиц).
+— Коротко. Каждое действие — конкретное поручение менеджеру с числами и сроком. Только то, что менеджер делает сам: график и люди на смене, станции, отправка курьеров, заготовки, остатки и поставка, стоп-лист, пятиминутка с командой.
+— Запрещены слова: «проанализировать», «оптимизировать», «улучшить», «внедрить», «рассмотреть», «повысить эффективность», «переобучить».
+— Максимум 3 проблемы, самые важные. Без Markdown (никаких *, #, таблиц). Эмодзи — только как в шаблоне.
 
-Формат (строго):
-📍 <точка>
-Главное: <1–2 предложения: что случилось и почему, связав показатели>
+Шаблон ответа (заполни своими данными, строго в этом виде):
+📊 <точка> — <период, если виден>
 
-✅ Хорошо: <1–2 показателя через запятую, со значением и сетью>
+🔎 Главное
+<1–2 коротких предложения: что случилось и почему>
 
-❗ Что исправить:
-1) <показатель> <значение> (сеть <значение>) — <почему, одной фразой>
-👉 <действие> (<когда>); <действие> (<когда>)
+✅ Хорошо
+• <показатель> <значение> (сеть <значение>)
 
-Пример хорошего ответа (числа выдуманы, бери свои из отчёта):
-📍 Москва - 5
-Главное: людей на смене много, а работают медленно: кухня делает 6,1 продукта в час на человека (сеть 8,0), курьеры возят по одному заказу — поэтому доставка долгая и растут сертификаты за опоздание.
+❗ Проблема 1: <показатель> <значение> (сеть <значение>)
+Почему: <одна фраза>
+Что сделать:
+• <поручение> — <сегодня / на ближайшей смене / до конца недели>
+• <поручение> — <когда>
 
-✅ Хорошо: рейтинг 4,9 (сеть 4,8), почти нет стопов 0,1% (сеть 0,5%)
-
-❗ Что исправить:
-1) Производительность кухни 6,1 (сеть 8,0) — на смене лишние люди в непиковые часы
-👉 Убери 1 повара с 11:00–16:00 в графике на следующую неделю (до конца недели)
-2) Доставка 38 мин (сеть 33), сертификаты 8,8% (сеть 6,5%) — курьеры уезжают с 1 заказом и ждут на точке
-👉 Отправляй курьера с 2 заказами в один район, если второй готов за 3 минуты (на ближайшей смене); поставь 1 курьера меньше в 14:00–17:00 (до конца недели)
-3) Упущенная выручка 3 610 ₽ из-за стопов — закончились заготовки в пик
-👉 Перед 17:00 проверь остатки и сделай заготовки на вечер (сегодня); заказывай поставку по остаткам, а не «на глаз» (до конца недели)
+❗ Проблема 2: …
 
 Если нужной точки в отчёте нет — напиши это и перечисли видимые точки. Если на фото не отчёт — ответь: «На фото нет отчёта с показателями».`;
 
@@ -129,6 +131,7 @@ export async function handleReportMessage(ctx, msg) {
   // «разбор» в ответ на фото — в любой теме; в теме отчётов — любое фото
   let source = null;
   let location = "";
+  const inReportTopic = isReportTopic(ctx, chatId, threadOf(msg));
   const trigger = (msg.text || "").match(TRIGGER_RE);
   if (msg.reply_to_message && trigger) {
     source = msg.reply_to_message;
@@ -137,7 +140,7 @@ export async function handleReportMessage(ctx, msg) {
       await ctx.tg.reply(msg, "Ответьте словом «разбор» на фото или скриншот отчёта.");
       return true;
     }
-  } else if (imageOf(msg) && isReportTopic(ctx, chatId, threadOf(msg))) {
+  } else if (imageOf(msg) && inReportTopic) {
     source = msg;
   }
   if (!source) return false;
@@ -151,16 +154,36 @@ export async function handleReportMessage(ctx, msg) {
     await ctx.tg.reply(msg, "ИИ для разбора отчётов не подключён (нет привязки AI в Cloudflare и ключа Gemini).");
     return true;
   }
+
+  // Слово «разбор» в чате не оставляем
+  if (msg !== source) await ctx.tg.del(chatId, msg.message_id);
+  // В теме отчётов бот публикует отчёт от себя, а сообщение пользователя удаляет
+  let reportMessageId = source.message_id;
+  if (inReportTopic) {
+    const reposted = await repostReport(ctx, source, threadOf(msg));
+    if (reposted) {
+      await ctx.tg.del(chatId, source.message_id);
+      reportMessageId = reposted.message_id;
+    }
+  }
   const placeholder = await ctx.tg.send(chatId, "⏳ Разбираю отчёт… Обычно это занимает 1–2 минуты.", {
-    thread: threadOf(msg), replyTo: source.message_id,
+    thread: threadOf(msg), replyTo: reportMessageId,
   });
   if (!placeholder) return true;
   await ctx.db.createReportJob({
-    chatId, threadId: threadOf(msg), sourceMessageId: source.message_id, fileId: image.fileId,
+    chatId, threadId: threadOf(msg), sourceMessageId: reportMessageId, fileId: image.fileId,
     caption: source.caption || "", requestedBy: fullName(msg.from), requestedById: msg.from.id,
     placeholderId: placeholder.message_id, location: location || await defaultLocation(ctx, chatId),
   });
   return true;
+}
+
+// Публикует отчёт от имени бота: фото — как фото, файл — как файл (без сжатия)
+async function repostReport(ctx, source, threadId) {
+  const params = { chat_id: source.chat.id, caption: "📊 Отчёт" + (source.caption ? `\n${esc(source.caption)}` : ""), parse_mode: "HTML" };
+  if (threadId) params.message_thread_id = threadId;
+  if (source.photo?.length) return ctx.tg.safe("sendPhoto", { ...params, photo: source.photo.at(-1).file_id });
+  return ctx.tg.safe("sendDocument", { ...params, document: source.document.file_id });
 }
 
 // ---------- работа ИИ (из планировщика) ----------
@@ -243,7 +266,7 @@ function contestants(ctx) {
   const list = [];
   if (ctx.cfg.geminiKey) list.push(geminiModel(ctx));
   if (ctx.ai) {
-    for (const m of [...new Set([ctx.cfg.aiModel, ...FALLBACK_MODELS])]) list.push(workersModel(ctx, m));
+    for (const m of ctx.cfg.aiModels) list.push(workersModel(ctx, m));
   }
   return list;
 }
@@ -299,9 +322,31 @@ async function analyze(ctx, job) {
   if (!answers.length) throw new Error(errors.join("; "));
   if (answers.length === 1) return { ...answers[0], why: "", judge: "", total: 1, errors };
 
-  // Судья — самая сильная из ответивших моделей (порядок участников: Gemini, Kimi, Llama)
+  // Судья — самая сильная из ответивших моделей (порядок участников: Gemini, затем AI_MODELS)
   const judges = models.filter((m) => answers.some((a) => a.name === m.name));
   return { ...(await pickBest(judges, answers, image, job.location)), total: answers.length, errors };
+}
+
+// Делает разбор читаемым: заголовки разделов и подписи «Почему» / «Что сделать» — жирным
+export function formatAnalysis(text) {
+  return text.split("\n").map((line) => {
+    const safe = esc(line.replace(/^\s*[-–—*]\s+/, "• "));
+    if (/^\s*(📊|🔎|✅|❗|⚠️)/u.test(line)) return `<b>${safe}</b>`;
+    return safe.replace(/^(\s*)(Почему:|Что сделать:)/, "$1<b>$2</b>");
+  }).join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
+// Техническая информация (какие модели ответили, ошибки) — только админам, в личку, без звука
+async function sendTechNote(ctx, job, best) {
+  const lines = [`🔧 <b>Разбор отчёта${job.location ? `: ${esc(job.location)}` : ""}</b> — тех. информация`];
+  lines.push(best.total > 1 ? `Выбран ответ: ${esc(best.name)} (лучший из ${best.total})` : `Ответила модель: ${esc(best.name)}`);
+  if (best.why) lines.push(`Почему выбран: ${esc(best.why.slice(0, 200))}`);
+  if (best.errors.length) lines.push(`Не ответили: ${esc(best.errors.join("; ").slice(0, 600))}`);
+  for (const adminId of ctx.cfg.adminIds) {
+    await ctx.tg.safe("sendMessage", {
+      chat_id: adminId, text: lines.join("\n"), parse_mode: "HTML", disable_notification: true,
+    });
+  }
 }
 
 export async function processReportJobs(ctx) {
@@ -311,24 +356,19 @@ export async function processReportJobs(ctx) {
     await ctx.db.bumpReportJob(job.id);
     try {
       const best = await analyze(ctx, job);
-      const where = job.location ? `: ${esc(job.location)}` : " по сети";
-      const who = best.total > 1 ? `лучший из ${best.total}: ${esc(best.name)}` : esc(best.name);
-      const header = `🤖 <b>Разбор отчёта${where}</b> (${who}; запросил(а) ${mention(job.requested_by_id, job.requested_by)})\n\n`;
-      let note = "";
-      if (best.why) note += `\n\n<i>🏆 Почему выбран этот ответ: ${esc(best.why.slice(0, 200))}</i>`;
-      // Какие модели не ответили и почему
-      if (best.errors.length) note += `\n<i>⚠️ ${esc(best.errors.join("; ").slice(0, 400))}</i>`;
-      await ctx.tg.edit(job.chat_id, job.placeholder_id, (header + esc(best.text)).slice(0, 3600) + note);
+      await ctx.tg.edit(job.chat_id, job.placeholder_id, formatAnalysis(best.text).slice(0, 4000));
       await ctx.db.finishReportJob(job.id, "done");
+      await sendTechNote(ctx, job, best);
     } catch (e) {
       console.error("Разбор отчёта не удался:", e);
       if (job.attempts + 1 >= MAX_ATTEMPTS) {
         await ctx.db.finishReportJob(job.id, "failed");
         const limit = /limit|quota|neuron|4006|429/i.test(String(e));
-        const reason = `\n\n<i>Причина: ${esc(String(e?.message || e).slice(0, 600))}</i>`;
-        await ctx.tg.edit(job.chat_id, job.placeholder_id, (limit
+        await ctx.tg.edit(job.chat_id, job.placeholder_id, limit
           ? "❌ Бесплатный дневной лимит ИИ закончился. Попробуйте завтра — ответьте на фото словом «разбор»."
-          : "❌ Не получилось разобрать отчёт. Попробуйте ещё раз: ответьте на фото словом «разбор».") + reason);
+          : "❌ Не получилось разобрать отчёт. Попробуйте ещё раз: ответьте на фото словом «разбор».");
+        // Причина — только админам
+        await sendTechNote(ctx, job, { name: "—", total: 0, why: "", errors: [String(e?.message || e)] });
       }
     }
   }

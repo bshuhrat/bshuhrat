@@ -235,7 +235,7 @@ export async function remindUnfixed(ctx) {
 }
 
 // Админ может вернуть фото в работу, если не согласен с исправлением
-async function isChatAdmin(ctx, chatId, userId) {
+export async function isChatAdmin(ctx, chatId, userId) {
   if (ctx.cfg.adminIds.has(userId)) return true;
   const member = await ctx.tg.safe("getChatMember", { chat_id: chatId, user_id: userId });
   return Boolean(member && ["creator", "administrator"].includes(member.status));

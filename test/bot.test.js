@@ -693,17 +693,19 @@ test("админ удалил сообщение бота — бот больш�
 
 
 // ---------- разбор отчётов ИИ ----------
-const KIMI = "@cf/moonshotai/kimi-k2.6";
 const LLAMA = "@cf/meta/llama-4-scout-17b-16e-instruct";
+const MISTRAL = "@cf/mistralai/mistral-small-3.1-24b-instruct";
+const GEMMA = "@cf/google/gemma-3-12b-it";
 const isJudge = (system) => /Ты проверяешь разборы/.test(system);
 
-// Имитация Workers AI: answers[model] — текст, Error или функция (input) => ответ
+// Имитация Workers AI: answers[model] — текст, Error или функция (input) => ответ; нет ключа — ошибка
 function fakeAI(answers) {
   const log = [];
   return {
     log,
     run: async (model, input) => {
       log.push({ model, input, judge: isJudge(input.messages[0].content) });
+      if (!(model in answers)) throw new Error(`5035: ${model} недоступна`);
       const a = typeof answers[model] === "function" ? answers[model](input) : answers[model];
       if (a instanceof Error) throw a;
       return { response: a };
@@ -716,10 +718,24 @@ async function requestReport(text = "разбор", thread = 5) {
   return report;
 }
 const lastEdit = (cs) => cs.filter((c) => c.method === "editMessageText").at(-1)?.params.text || "";
+const techNotes = (cs) => cs.filter((c) => c.method === "sendMessage" && c.params.chat_id === 100 && /тех\. информация/.test(c.params.text));
 
-test("разбор отчёта: очередь, нормы, промпт с картинкой", async () => {
+const ANALYSIS = `📊 Москва - 8 — 30.10
+
+🔎 Главное
+Людей много, работают медленно.
+
+✅ Хорошо
+- рейтинг 4,80 (сеть 4,72)
+
+❗ Проблема 1: Производительность кухни 6,51 (сеть 7,96)
+Почему: лишние люди на смене
+Что сделать:
+• Убери 1 повара с 12:00–16:00 — до конца недели`;
+
+test("разбор отчёта: очередь, промпт, читаемый ответ, тех. информация только админам", async () => {
   tgState.webhook = "https://bot.example.workers.dev/webhook";
-  const ai = fakeAI({ [KIMI]: "<think>считаю</think>📍 Москва - 8\nГлавное: **много людей**", [LLAMA]: new Error("AiError: 3040: capacity") });
+  const ai = fakeAI({ [LLAMA]: "<think>считаю</think>" + ANALYSIS.replace("Людей много", "**Людей много**") });
   env.AI = ai;
   const T = { thread: 5 };
 
@@ -729,132 +745,187 @@ test("разбор отчёта: очередь, нормы, промпт с к�
   cs = await during(() => msg(SAMI, "/normy", T));
   assert.match(texts(cs)[0], /доставка до 30 мин/);
 
-  cs = await during(() => requestReport());
+  let report;
+  cs = await during(async () => { report = await requestReport(); });
   assert.match(one(cs, "sendMessage").params.text, /Разбираю отчёт/);
+  assert.ok(cs.some((c) => c.method === "deleteMessage" && c.params.message_id !== report.message_id),
+    "слово «разбор» удалено");
+  assert.ok(!cs.some((c) => c.method === "deleteMessage" && c.params.message_id === report.message_id),
+    "вне темы отчётов фото пользователя не трогаем");
   assert.equal(ai.log.length, 0, "ИИ работает в фоне, не в вебхуке");
   cs = await during(() => msg(SAMI, "разбор", { ...T, reply: { message_id: 1, date: 0, chat: G, text: "текст" } }));
   assert.match(texts(cs)[0], /на фото или скриншот/);
 
   cs = await during(runCron);
-  const kimiCall = ai.log.find((c) => c.model === KIMI);
-  const user = kimiCall.input.messages[1].content;
+  const call = ai.log.find((c) => c.model === LLAMA);
+  const user = call.input.messages[1].content;
   assert.match(user[0].text, /Нормы: доставка до 30 мин; списания до 2%[\s\S]*отчёт за неделю/);
   assert.match(user[1].image_url.url, /^data:image\/jpeg;base64,/);
-  assert.match(kimiCall.input.messages[0].content, /менеджер/);
+  assert.match(call.input.messages[0].content, /Шаблон ответа/);
+  assert.doesNotMatch(call.input.messages[0].content, /Убери 1 повара/, "в инструкции нет готовых действий для копирования");
+  assert.deepEqual([...new Set(ai.log.map((c) => c.model))], [LLAMA, MISTRAL, GEMMA], "бесплатные модели, без Kimi");
+
   const text = lastEdit(cs);
-  assert.match(text, /Разбор отчёта[\s\S]*Kimi K2\.6[\s\S]*Sami[\s\S]*Главное: много людей/);
-  assert.doesNotMatch(text, /считаю|\*\*/, "без рассуждений и Markdown");
-  assert.match(text, /Llama 4 Scout: AiError: 3040/, "видно, какая модель не ответила");
-  assert.equal(ai.log.filter((c) => c.judge).length, 0, "один ответ — судья не нужен");
+  assert.match(text, /^<b>📊 Москва - 8 — 30\.10<\/b>/);
+  assert.match(text, /<b>🔎 Главное<\/b>\nЛюдей много/);
+  assert.match(text, /• рейтинг 4,80/, "пункты списком");
+  assert.match(text, /<b>Почему:<\/b> лишние люди[\s\S]*<b>Что сделать:<\/b>\n• Убери 1 повара/);
+  assert.doesNotMatch(text, /считаю|\*\*|Llama|Mistral|5035|запросил/, "в чате — только разбор");
+  const note = techNotes(cs);
+  assert.equal(note.length, 1, "тех. информация — админу в личку");
+  assert.equal(note[0].params.disable_notification, true);
+  assert.match(note[0].params.text, /Ответила модель: Llama 4 Scout[\s\S]*Не ответили: Mistral Small 3\.1: 5035[\s\S]*Gemma 3/);
   cs = await during(runCron);
-  assert.equal(ai.log.length, 2, "каждый отчёт разбирается один раз");
+  assert.equal(ai.log.filter((c) => !c.judge).length, 3, "каждый отчёт разбирается один раз");
   delete env.AI;
 });
 
 test("разбор отчёта: несколько моделей, судья выбирает лучший", async () => {
   const ai = fakeAI({
-    [KIMI]: (input) => isJudge(input.messages[0].content)
+    [LLAMA]: (input) => isJudge(input.messages[0].content)
       ? 'Сверил. {"best": "B", "why": "числа совпадают с отчётом"}'
-      : "Ответ Кими: проанализировать работу",
-    [LLAMA]: "Ответ Ламы: убери 1 повара 11–16 (до конца недели)",
+      : "Ответ Ламы: проанализировать работу",
+    [MISTRAL]: "Ответ Мистраля: убери 1 повара 12–16 — до конца недели",
   });
   env.AI = ai;
   await requestReport();
   const cs = await during(runCron);
   const text = lastEdit(cs);
-  assert.match(text, /лучший из 2: Llama 4 Scout/);
   assert.match(text, /убери 1 повара/);
-  assert.doesNotMatch(text, /Ответ Кими/);
-  assert.match(text, /Почему выбран этот ответ: числа совпадают с отчётом/);
+  assert.doesNotMatch(text, /Ответ Ламы|лучший из/);
+  assert.match(techNotes(cs)[0].params.text, /Выбран ответ: Mistral Small 3\.1 \(лучший из 2\)[\s\S]*Почему выбран: числа совпадают/);
   const judgeCall = ai.log.find((c) => c.judge);
-  assert.equal(judgeCall.model, KIMI, "судья — самая сильная из ответивших");
-  const judgeText = judgeCall.input.messages[1].content[0].text;
-  assert.match(judgeText, /Разбор A[\s\S]*Ответ Кими[\s\S]*Разбор B[\s\S]*Ответ Ламы/);
+  assert.equal(judgeCall.model, LLAMA, "судья — первая из ответивших");
+  assert.match(judgeCall.input.messages[1].content[0].text, /Разбор A[\s\S]*Ответ Ламы[\s\S]*Разбор B[\s\S]*Ответ Мистраля/);
   assert.ok(judgeCall.input.messages[1].content[1].image_url, "судья видит отчёт");
 
   // судья ответил ерундой — берём первый ответ
-  env.AI = fakeAI({ [KIMI]: (i) => (isJudge(i.messages[0].content) ? "не знаю" : "Ответ Кими"), [LLAMA]: "Ответ Ламы" });
+  env.AI = fakeAI({ [LLAMA]: (i) => (isJudge(i.messages[0].content) ? "не знаю" : "Ответ Ламы"), [MISTRAL]: "Ответ Мистраля" });
   await requestReport();
-  assert.match(lastEdit(await during(runCron)), /лучший из 2: Kimi K2\.6[\s\S]*Ответ Кими/);
+  assert.match(lastEdit(await during(runCron)), /Ответ Ламы/);
   delete env.AI;
 });
 
-test("разбор отчёта: Gemini участвует и судит, если есть ключ", async () => {
-  env.AI = fakeAI({ [KIMI]: new Error("AiError: 5006: bad input"), [LLAMA]: "Ответ Ламы" });
+test("разбор отчёта: Gemini участвует и судит, если есть ключ; ошибки — только админам", async () => {
+  env.AI = fakeAI({ [LLAMA]: "Ответ Ламы" });
   env.GEMINI_API_KEY = " test-key ";
   geminiHandler = (body) => /Ты проверяешь разборы/.test(body.system_instruction.parts[0].text)
     ? '{"best": "A", "why": "конкретнее и цифры верные"}'
-    : "Ответ Gemini: поставь 2 заказа на курьера (на ближайшей смене)";
+    : "Ответ Gemini: 2 заказа на курьера — на ближайшей смене";
   await requestReport();
-  const cs = await during(runCron);
+  let cs = await during(runCron);
   const gem = cs.filter((c) => c.method === "gemini");
   assert.equal(gem.length, 2, "ответ + судейство");
   assert.equal(gem[0].headers["x-goog-api-key"], "test-key");
   assert.match(gem[0].url, /models\/gemini-flash-latest:generateContent/);
   assert.equal(gem[0].params.contents[0].parts[1].inline_data.mime_type, "image/jpeg");
-  const text = lastEdit(cs);
-  assert.match(text, /лучший из 2: Gemini[\s\S]*2 заказа на курьера/);
-  assert.match(text, /Kimi K2\.6: AiError: 5006/);
+  assert.match(lastEdit(cs), /2 заказа на курьера/);
+  assert.match(techNotes(cs)[0].params.text, /Выбран ответ: Gemini/);
 
   // только Gemini, без Workers AI — тоже работает
   delete env.AI;
   await requestReport();
-  assert.match(lastEdit(await during(runCron)), /\(Gemini; запросил/);
+  assert.match(lastEdit(await during(runCron)), /Ответ Gemini/);
 
-  // лимит у всех — понятное сообщение после двух попыток
+  // лимит у всех — понятное сообщение в чате, причина — админу
   geminiHandler = () => new Error("Resource has been exhausted (e.g. check quota).");
   await requestReport();
   await runCron();
-  const fail = lastEdit(await during(runCron));
-  assert.match(fail, /дневной лимит ИИ закончился[\s\S]*Причина: Gemini: HTTP 429/);
+  cs = await during(runCron);
+  const fail = lastEdit(cs);
+  assert.match(fail, /дневной лимит ИИ закончился/);
+  assert.doesNotMatch(fail, /HTTP 429|Gemini/, "в чате без технических подробностей");
+  assert.match(techNotes(cs)[0].params.text, /Не ответили: Gemini: HTTP 429/);
   delete env.GEMINI_API_KEY;
   geminiHandler = null;
 });
 
-test("разбор отчёта: точка по умолчанию, точка в запросе, тема отчётов", async () => {
-  const ai = fakeAI({ [KIMI]: "📍 разбор", [LLAMA]: new Error("нет") });
+test("разбор отчёта: точка, тема отчётов — бот публикует отчёт от себя", async () => {
+  const ai = fakeAI({ [LLAMA]: "📊 разбор" });
   env.AI = ai;
   const T = { thread: 5 };
   const lastPrompt = () => ai.log.filter((c) => !c.judge).at(-1).input.messages[1].content[0].text;
 
   env.REPORT_LOCATION = "Москва 8";
   await requestReport();
-  let cs = await during(runCron);
+  await runCron();
   assert.match(lastPrompt(), /Разбери точку: Москва 8\./);
-  assert.match(lastEdit(cs), /Разбор отчёта: Москва 8/);
-
   await requestReport("Разбор Москва 3");
-  cs = await during(runCron);
+  await runCron();
   assert.match(lastPrompt(), /Разбери точку: Москва 3\./);
-  assert.match(lastEdit(cs), /Разбор отчёта: Москва 3/);
 
   await msg(ALI, "/tochka_set Москва 1", T);
-  cs = await during(() => msg(SAMI, "/tochka", T));
+  let cs = await during(() => msg(SAMI, "/tochka", T));
   assert.match(texts(cs)[0], /Москва 8/, "не-админ не меняет точку");
   await msg(ADM, "/tochka_set Москва 5", T);
   await requestReport();
   await runCron();
   assert.match(lastPrompt(), /Разбери точку: Москва 5\./);
-
   await msg(ADM, "/tochka_set", T);
   delete env.REPORT_LOCATION;
   await requestReport();
-  cs = await during(runCron);
+  await runCron();
   assert.match(lastPrompt(), /Точка не указана/);
-  assert.match(lastEdit(cs), /Разбор отчёта по сети/);
 
-  // тема отчётов: фото разбирается без слова «разбор»
+  // тема отчётов: фото пользователя удаляется, бот публикует его от себя, разбор — под ним
   env.REPORT_TOPIC = "https://t.me/c/1/95";
-  cs = await during(() => photo(ALI, null, { thread: 95 }));
-  assert.match(one(cs, "sendMessage").params.text, /Разбираю отчёт/);
+  let userPhoto;
+  cs = await during(async () => { userPhoto = await photo(ALI, "за субботу", { thread: 95 }); });
+  const repost = one(cs, "sendPhoto");
+  assert.equal(repost.params.photo, userPhoto.photo.at(-1).file_id);
+  assert.equal(repost.params.message_thread_id, 95);
+  assert.match(repost.params.caption, /📊 Отчёт\nза субботу/);
+  assert.ok(cs.some((c) => c.method === "deleteMessage" && c.params.message_id === userPhoto.message_id), "фото пользователя удалено");
+  const placeholder = cs.find((c) => c.method === "sendMessage" && /Разбираю/.test(c.params.text));
+  const job = await DB.prepare("SELECT * FROM report_jobs ORDER BY id DESC LIMIT 1").first();
+  assert.equal(placeholder.params.reply_parameters.message_id, job.source_message_id, "разбор — ответом на отчёт бота");
+  assert.notEqual(job.source_message_id, userPhoto.message_id);
+
+  // файл-картинка публикуется файлом, без сжатия
+  cs = await during(() => msg(ALI, null, { thread: 95, extra: { document: { file_id: "DOC1", mime_type: "image/png", file_name: "r.png" } } }));
+  assert.equal(one(cs, "sendDocument").params.document, "DOC1");
+
   cs = await during(() => photo(ALI, null, { thread: 5 }));
-  assert.equal(cs.filter((c) => /Разбираю/.test(c.params.text || "")).length, 0);
+  assert.equal(cs.filter((c) => /Разбираю/.test(c.params.text || "")).length, 0, "в других темах — только по слову «разбор»");
+  await runCron();
   await runCron();
   delete env.REPORT_TOPIC;
 
   // без ИИ — честное сообщение
   delete env.AI;
-  await requestReport();
   cs = await during(() => msg(SAMI, "разбор", { ...T, reply: { message_id: 2, date: 0, chat: G, photo: [{ file_id: "x" }] } }));
   assert.match(texts(cs)[0], /не подключён/);
+});
+
+test("админ исправляет любой текст бота ответом «исправить»", async () => {
+  const BOT = { id: 1, is_bot: true, first_name: "bot", username: "test_bot" };
+  const botMsg = { message_id: 7001, date: 0, chat: G, from: BOT, text: "старый текст",
+    reply_markup: { inline_keyboard: [[{ text: "Кнопка", callback_data: "x:1" }]] } };
+  const T = { thread: 5 };
+
+  // обычный участник — ничего не происходит
+  let cs = await during(() => msg(SAMI, "исправить новый", { ...T, reply: botMsg }));
+  assert.equal(cs.filter((c) => c.method === "editMessageText").length, 0);
+
+  // админ группы: текст заменён, кнопки и форматирование сохранены, его сообщение удалено
+  const text = "Исправить:\nНовый текст жирным";
+  const start = text.indexOf("жирным");
+  let adminMsg;
+  cs = await during(async () => {
+    adminMsg = await msg(GADM, text, { ...T, reply: botMsg, extra: { entities: [{ type: "bold", offset: start, length: 6 }] } });
+  });
+  const edit = one(cs, "editMessageText");
+  assert.equal(edit.params.text, "Новый текст жирным");
+  assert.deepEqual(edit.params.entities, [{ type: "bold", offset: "Новый текст ".length, length: 6 }]);
+  assert.deepEqual(edit.params.reply_markup, botMsg.reply_markup);
+  assert.ok(cs.some((c) => c.method === "deleteMessage" && c.params.message_id === adminMsg.message_id));
+
+  // подпись к фото бота
+  const botPhoto = { message_id: 7002, date: 0, chat: G, from: BOT, photo: [{ file_id: "P" }], caption: "старая подпись" };
+  cs = await during(() => msg(ADM, "исправить новая подпись", { ...T, reply: botPhoto }));
+  assert.equal(one(cs, "editMessageCaption").params.caption, "новая подпись");
+
+  // «исправить» в ответ не боту — не трогаем
+  cs = await during(() => msg(ADM, "исправить что-то", { ...T, reply: { message_id: 5, date: 0, chat: G, from: ALI, text: "x" } }));
+  assert.equal(cs.filter((c) => /^edit/.test(c.method)).length, 0);
 });
