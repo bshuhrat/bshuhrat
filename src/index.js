@@ -32,6 +32,7 @@ function loadConfig(env) {
     remindBeforeHours: Number(env.REMIND_BEFORE_HOURS || 24),
     photoFixTimeoutMin: Number(env.PHOTO_FIX_TIMEOUT_MIN || 60),
     photoTopic: parseTopicLink(env.PHOTO_TOPIC),
+    checklistTopic: parseTopicLink(env.CHECKLIST_TOPIC),
     reportTopic: parseTopicLink(env.REPORT_TOPIC),
     reportLocation: String(env.REPORT_LOCATION || "").trim(),
     // AI_MODEL — модель, которую пробовать первой; AI_MODELS — весь список через запятую
@@ -84,17 +85,19 @@ async function handleUpdate(ctx, update) {
 
 const GROUP_COMMANDS = [
   ["zayavki", "Незакрытые поломки (тема «Заявки»)"], ["dolgi", "Что не вернули / не оформили (тема обменов)"], ["kw", "Слова, на которые реагирует бот (тема «Заявки»)"],
-  ["tasks", "Открытые задания темы"], ["info", "Описание темы"], ["faq", "Частые вопросы"],
+  ["tasks", "Открытые задания темы"], ["checklists", "Чек-листы открытия и закрытия"], ["info", "Описание темы"], ["faq", "Частые вопросы"],
   ["ask", "Вопрос администратору"], ["my", "Моя статистика"], ["help", "Помощь"],
 ];
 // Админам группы меню показывает ещё и команды настройки
 const ADMIN_GROUP_COMMANDS = [
   ...GROUP_COMMANDS,
   ["kw_add", "Добавить слово для поломок"], ["kw_del", "Убрать слово для поломок"],
+  ["checklist", "Запустить чек-лист"], ["checklist_set", "Настроить чек-лист"],
+  ["checklist_cancel", "Отменить активный чек-лист"],
   ["normy_set", "Нормы для разбора отчётов"], ["tochka_set", "Точка для разбора отчётов"],
 ];
 // Меняется при изменении списков команд — тогда бот сам обновит меню после деплоя
-const COMMANDS_VERSION = "3";
+const COMMANDS_VERSION = "4";
 
 const PRIVATE_COMMANDS = [
   ["stats", "Общая статистика"], ["pending", "Работы на проверке"], ["requests", "Вопросы участников"],

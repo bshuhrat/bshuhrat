@@ -67,6 +67,24 @@ const SCHEMA = [
     kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', -- open | done | cancelled
     created_at TEXT NOT NULL, due_at TEXT NOT NULL, bot_message_id INTEGER, remind_message_ids TEXT,
     closed_by_id INTEGER, closed_by_name TEXT, closed_at TEXT, UNIQUE (chat_id, message_id))`,
+  // Чек-листы открытия и закрытия: шаблоны, ежедневные запуски и отметки пунктов
+  `CREATE TABLE IF NOT EXISTS checklist_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
+    kind TEXT NOT NULL, title TEXT, items TEXT NOT NULL, start_time TEXT NOT NULL,
+    due_minutes INTEGER NOT NULL DEFAULT 45, enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL, UNIQUE (chat_id, thread_id, kind))`,
+  `CREATE TABLE IF NOT EXISTS checklist_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, template_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, kind TEXT NOT NULL,
+    title TEXT, local_date TEXT NOT NULL, items TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+    message_id INTEGER, created_at TEXT NOT NULL, due_at TEXT NOT NULL,
+    reminded INTEGER NOT NULL DEFAULT 0, reminder_message_id INTEGER,
+    completed_at TEXT, completed_by_id INTEGER, completed_by_name TEXT)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS checklist_runs_active_day
+    ON checklist_runs (template_id, local_date) WHERE status != 'cancelled'`,
+  `CREATE TABLE IF NOT EXISTS checklist_checks (
+    run_id INTEGER NOT NULL, item_index INTEGER NOT NULL, user_id INTEGER NOT NULL,
+    user_name TEXT NOT NULL, checked_at TEXT NOT NULL, PRIMARY KEY (run_id, item_index))`,
   // Очередь разбора отчётов ИИ
   `CREATE TABLE IF NOT EXISTS report_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
@@ -90,6 +108,8 @@ const MIGRATIONS = [
   "ALTER TABLE photo_fixes ADD COLUMN admin_messages TEXT",
   "ALTER TABLE repairs ADD COLUMN check_message_ids TEXT",
   "ALTER TABLE report_jobs ADD COLUMN location TEXT",
+  "ALTER TABLE checklist_templates ADD COLUMN title TEXT",
+  "ALTER TABLE checklist_runs ADD COLUMN title TEXT",
 ];
 
 let schemaReady = false;
@@ -684,6 +704,134 @@ export class Database {
   dueExchanges(nowIso_, limit) {
     return this.all(
       "SELECT * FROM exchanges WHERE status = 'open' AND due_at <= ? ORDER BY due_at LIMIT ?", nowIso_, limit,
+    );
+  }
+
+  // ---------- чек-листы открытия и закрытия ----------
+  async upsertChecklistTemplate({ chatId, threadId, kind, title = null, items, startTime, dueMinutes }) {
+    await this.run(
+      `INSERT INTO checklist_templates (chat_id, thread_id, kind, title, items, start_time, due_minutes, enabled, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+       ON CONFLICT (chat_id, thread_id, kind) DO UPDATE SET title = excluded.title,
+       items = excluded.items, start_time = excluded.start_time, due_minutes = excluded.due_minutes,
+       enabled = 1, updated_at = excluded.updated_at`,
+      chatId, threadId, kind, title, JSON.stringify(items), startTime, dueMinutes, nowIso(),
+    );
+    return this.checklistTemplate(chatId, threadId, kind);
+  }
+
+  checklistTemplate(chatId, threadId, kind) {
+    return this.one(
+      "SELECT * FROM checklist_templates WHERE chat_id = ? AND thread_id = ? AND kind = ?",
+      chatId, threadId, kind,
+    );
+  }
+
+  checklistTemplates(chatId, threadId = null) {
+    if (threadId === null) {
+      return this.all("SELECT * FROM checklist_templates WHERE chat_id = ? ORDER BY kind", chatId);
+    }
+    return this.all(
+      "SELECT * FROM checklist_templates WHERE chat_id = ? AND thread_id = ? ORDER BY kind",
+      chatId, threadId,
+    );
+  }
+
+  enabledChecklistTemplates() {
+    return this.all("SELECT * FROM checklist_templates WHERE enabled = 1 ORDER BY id");
+  }
+
+  setChecklistTemplateEnabled(id, enabled) {
+    return this.run("UPDATE checklist_templates SET enabled = ? WHERE id = ?", enabled ? 1 : 0, id);
+  }
+
+  async createChecklistRun(template, localDate, dueAt) {
+    const r = await this.run(
+      `INSERT OR IGNORE INTO checklist_runs
+       (template_id, chat_id, thread_id, kind, title, local_date, items, created_at, due_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      template.id, template.chat_id, template.thread_id, template.kind, template.title || null, localDate,
+      template.items, nowIso(), dueAt,
+    );
+    return r.changes > 0 ? r.lastId : null;
+  }
+
+  getChecklistRun(id) {
+    return this.one("SELECT * FROM checklist_runs WHERE id = ?", id);
+  }
+
+  checklistRunForDate(templateId, localDate) {
+    return this.one(
+      `SELECT * FROM checklist_runs WHERE template_id = ? AND local_date = ?
+       AND status != 'cancelled' ORDER BY id DESC LIMIT 1`,
+      templateId, localDate,
+    );
+  }
+
+  checklistAnyRunForDate(templateId, localDate) {
+    return this.one(
+      `SELECT * FROM checklist_runs WHERE template_id = ? AND local_date = ?
+       ORDER BY id DESC LIMIT 1`,
+      templateId, localDate,
+    );
+  }
+
+  openChecklistRun(templateId) {
+    return this.one(
+      "SELECT * FROM checklist_runs WHERE template_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1",
+      templateId,
+    );
+  }
+
+  setChecklistRunMessage(id, messageId) {
+    return this.run("UPDATE checklist_runs SET message_id = ? WHERE id = ?", messageId, id);
+  }
+
+  checklistChecks(runId) {
+    return this.all("SELECT * FROM checklist_checks WHERE run_id = ? ORDER BY item_index", runId);
+  }
+
+  // Возвращает true, если пункт после нажатия отмечен, и false, если отметка снята
+  async toggleChecklistItem(runId, itemIndex, userId, userName) {
+    const r = await this.run(
+      `INSERT OR IGNORE INTO checklist_checks (run_id, item_index, user_id, user_name, checked_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      runId, itemIndex, userId, userName, nowIso(),
+    );
+    if (r.changes > 0) return true;
+    await this.run(
+      "DELETE FROM checklist_checks WHERE run_id = ? AND item_index = ?", runId, itemIndex,
+    );
+    return false;
+  }
+
+  async completeChecklistRun(id, userId, userName) {
+    const r = await this.run(
+      `UPDATE checklist_runs SET status = 'done', completed_at = ?, completed_by_id = ?,
+       completed_by_name = ? WHERE id = ? AND status = 'open'`,
+      nowIso(), userId, userName, id,
+    );
+    return r.changes > 0;
+  }
+
+  cancelChecklistRun(id) {
+    return this.run(
+      "UPDATE checklist_runs SET status = 'cancelled' WHERE id = ? AND status = 'open'", id,
+    );
+  }
+
+  dueChecklistRuns(nowIso_, limit) {
+    return this.all(
+      `SELECT * FROM checklist_runs WHERE status = 'open' AND reminded = 0 AND due_at <= ?
+       ORDER BY due_at LIMIT ?`,
+      nowIso_, limit,
+    );
+  }
+
+  markChecklistRunReminded(id, messageId) {
+    return this.run(
+      "UPDATE checklist_runs SET reminded = 1, reminder_message_id = ? WHERE id = ?",
+      messageId, id,
     );
   }
 

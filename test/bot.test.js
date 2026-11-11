@@ -1164,3 +1164,173 @@ test("важные сообщения: подтверждение прочтен
   delete env.PHOTO_REMIND_FROM;
   delete env.PHOTO_REMIND_TO;
 });
+
+
+test("чек-листы открытия и закрытия: настройка, запуск, отметки, напоминания и отмена", async () => {
+  tgState.webhook = "https://bot.example.workers.dev/webhook";
+  const T = { thread: 77 };
+  const runMessage = (run) => ({ message_id: run.message_id, date: 0, chat: G, text: "checklist" });
+
+  let cs = await during(() => msg(ADM,
+    "/checklist_set открытие 08:00 30 | Включить печи; Проверить холодильники; Подготовить зал", T));
+  assert.match(texts(cs)[0], /Чек-лист открытия сохранён: 3 пункт/);
+  const opening = await DB.prepare("SELECT * FROM checklist_templates WHERE kind = 'opening'").first();
+  assert.equal(opening.start_time, "08:00");
+  assert.equal(opening.due_minutes, 30);
+  assert.deepEqual(JSON.parse(opening.items), ["Включить печи", "Проверить холодильники", "Подготовить зал"]);
+
+  cs = await during(() => msg(ALI, "/checklist_set закрытие 22:00 | Не должно сохраниться", T));
+  assert.match(texts(cs)[0], /только администраторы/);
+  assert.equal(await DB.prepare("SELECT * FROM checklist_templates WHERE kind = 'closing'").first(), null);
+
+  cs = await during(() => msg(ADM, "/checklist открытие", T));
+  const publication = cs.find((c) => /Чек-лист открытия/.test(c.params.text || "") && c.params.reply_markup);
+  assert.ok(publication);
+  assert.equal(publication.params.message_thread_id, 77);
+  assert.equal(publication.params.reply_markup.inline_keyboard.length, 3);
+  let run = await DB.prepare("SELECT * FROM checklist_runs WHERE kind = 'opening'").first();
+  assert.ok(run.message_id);
+
+  cs = await during(() => press(ALI, `cl:${run.id}:0`, runMessage(run)));
+  let edit = one(cs, "editMessageText");
+  assert.match(edit.params.text, /Выполнено: <b>1 из 3<\/b>[\s\S]*✅ <b>1\.<\/b> Включить печи[\s\S]*Ali/);
+  assert.equal(edit.params.reply_markup.inline_keyboard[0][0].text.startsWith("✅ 1."), true);
+  cs = await during(() => press(ALI, `cl:${run.id}:0`, runMessage(run)));
+  assert.match(one(cs, "editMessageText").params.text, /Выполнено: <b>0 из 3<\/b>/,
+    "повторное нажатие снимает случайную отметку");
+
+  await press(ALI, `cl:${run.id}:0`, runMessage(run));
+  await press(VALI, `cl:${run.id}:1`, runMessage(run));
+  cs = await during(() => press(SAMI, `cl:${run.id}:2`, runMessage(run)));
+  edit = one(cs, "editMessageText");
+  assert.match(edit.params.text, /Выполнено: <b>3 из 3<\/b>[\s\S]*Всё выполнено[\s\S]*Sami/);
+  assert.deepEqual(edit.params.reply_markup.inline_keyboard, []);
+  assert.equal((await DB.prepare("SELECT status FROM checklist_runs WHERE id = ?").bind(run.id).first()).status, "done");
+
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => /Чек-лист открытия/.test(c.params.text || "") && c.method === "sendMessage").length, 0,
+    "выполненный чек-лист не публикуется повторно");
+  cs = await during(() => msg(ALI, "/checklists", T));
+  assert.match(texts(cs)[0], /Чек-лист открытия[\s\S]*✅ выполнен/);
+
+  // Автоматическая публикация по местному времени — один раз в день.
+  await msg(ADM, "/checklist_set закрытие 00:00 20 | Помыть поверхности; Выключить оборудование", T);
+  cs = await during(runCron);
+  const auto = cs.find((c) => /Чек-лист закрытия/.test(c.params.text || "") && c.params.reply_markup);
+  assert.ok(auto, "планировщик опубликовал чек-лист закрытия");
+  const closingRun = await DB.prepare("SELECT * FROM checklist_runs WHERE kind = 'closing' ORDER BY id DESC LIMIT 1").first();
+  sqlite.prepare("UPDATE checklist_runs SET due_at = ?, reminded = 0, reminder_message_id = NULL WHERE id = ?")
+    .run(new Date(Date.now() + 3_600_000).toISOString(), closingRun.id);
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => /Чек-лист закрытия/.test(c.params.text || "") && c.params.reply_markup).length, 0,
+    "автоматическая публикация не дублируется");
+
+  // После срока — одно напоминание только с невыполненными пунктами.
+  await press(VALI, `cl:${closingRun.id}:0`, runMessage(closingRun));
+  sqlite.prepare("UPDATE checklist_runs SET due_at = '2020-01-01T00:00:00Z' WHERE id = ?").run(closingRun.id);
+  cs = await during(runCron);
+  const reminder = cs.find((c) => /Срок: Чек-лист закрытия/.test(c.params.text || ""));
+  assert.ok(reminder, JSON.stringify({ run: await DB.prepare("SELECT * FROM checklist_runs WHERE id = ?")
+    .bind(closingRun.id).first(), calls: cs.map((c) => ({ method: c.method, text: c.params.text })) }));
+  assert.match(reminder.params.text, /Выполнено 1 из 2/);
+  assert.doesNotMatch(reminder.params.text, /⬜ 1\. Помыть/);
+  assert.match(reminder.params.text, /⬜ 2\. Выключить/);
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => /Срок: Чек-лист закрытия/.test(c.params.text || "")).length, 0);
+
+  // Администратор группы (не из ADMIN_IDS) может отменить и запустить заново.
+  cs = await during(() => msg(GADM, "/checklist_cancel закрытие", T));
+  assert.match(texts(cs)[0], /отменён/);
+  assert.equal((await DB.prepare("SELECT status FROM checklist_runs WHERE id = ?").bind(closingRun.id).first()).status,
+    "cancelled");
+  cs = await during(() => msg(GADM, "/checklist закрытие", T));
+  assert.ok(cs.some((c) => /Чек-лист закрытия/.test(c.params.text || "") && c.params.reply_markup));
+  const restarted = await DB.prepare("SELECT * FROM checklist_runs WHERE kind = 'closing' ORDER BY id DESC LIMIT 1").first();
+  assert.notEqual(restarted.id, closingRun.id);
+
+  // Удаление сообщения бота снимает чек-лист с контроля без напоминания.
+  tgState.deleted.add(restarted.message_id);
+  sqlite.prepare("UPDATE checklist_runs SET due_at = '2020-01-01T00:00:00Z' WHERE id = ?").run(restarted.id);
+  cs = await during(runCron);
+  assert.equal(cs.filter((c) => /Срок: Чек-лист закрытия/.test(c.params.text || "")).length, 0);
+  assert.equal((await DB.prepare("SELECT status FROM checklist_runs WHERE id = ?").bind(restarted.id).first()).status,
+    "cancelled");
+  cs = await during(runCron);
+  assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM checklist_runs WHERE kind = 'closing'").first()).n, 2,
+    "отменённый чек-лист не создаётся планировщиком заново в тот же день");
+  assert.equal(cs.filter((c) => /Чек-лист закрытия/.test(c.params.text || "") && c.params.reply_markup).length, 0);
+
+  await msg(ADM, "/checklist_off открытие", T);
+  assert.equal((await DB.prepare("SELECT enabled FROM checklist_templates WHERE id = ?").bind(opening.id).first()).enabled, 0);
+  await msg(ADM, "/checklist_on открытие", T);
+  assert.equal((await DB.prepare("SELECT enabled FROM checklist_templates WHERE id = ?").bind(opening.id).first()).enabled, 1);
+  tgState.deleted.clear();
+});
+
+
+test("готовый «Обход пиццерии»: 55 пунктов, страницы и срок 08:30–10:00", async () => {
+  tgState.webhook = "https://bot.example.workers.dev/webhook";
+  env.CHECKLIST_TOPIC = "https://t.me/c/1/88";
+  const { DEFAULT_CHECKLIST_ITEMS } = await import("../src/default-checklist.js");
+  assert.equal(DEFAULT_CHECKLIST_ITEMS.length, 55);
+  assert.deepEqual([...new Set(DEFAULT_CHECKLIST_ITEMS.map((x) => x.section))], [
+    "Ресторан", "Зона кассы", "Раскатка", "Начинение", "Упаковка",
+    "Холодный цех, холодильники и морозильники",
+    "Зона курьеров, сухой склад, комната сотрудников, туалет",
+  ]);
+
+  await msg(ADM, "/checklist_set открытие 07:00 | Старый пункт", { thread: 88 });
+  await runCron(); // первая установка заменяет старый шаблон; после 08:30 создаёт и ежедневный запуск
+  const template = await DB.prepare("SELECT * FROM checklist_templates WHERE thread_id = 88").first();
+  assert.ok(template);
+  assert.equal(template.title, "Обход пиццерии");
+  assert.equal(template.start_time, "08:30");
+  assert.equal(template.due_minutes, 90);
+  assert.equal(JSON.parse(template.items).length, 55);
+
+  let run = await DB.prepare("SELECT * FROM checklist_runs WHERE template_id = ?").bind(template.id).first();
+  if (!run) {
+    await msg(ADM, "/checklist открытие", { thread: 88 });
+    run = await DB.prepare("SELECT * FROM checklist_runs WHERE template_id = ?").bind(template.id).first();
+  }
+  assert.equal(run.title, "Обход пиццерии");
+  const message = { message_id: run.message_id, date: 0, chat: G, text: "checklist" };
+
+  let cs = await during(() => press(ALI, `cl:${run.id}:p:0`, message));
+  let edit = one(cs, "editMessageText");
+  assert.match(edit.params.text, /Обход пиццерии[\s\S]*0 из 55[\s\S]*Страница 1 из 10[\s\S]*Ресторан/);
+  assert.equal(edit.params.reply_markup.inline_keyboard.length, 7, "6 пунктов и строка навигации");
+
+  cs = await during(() => press(ALI, `cl:${run.id}:p:1`, message));
+  edit = one(cs, "editMessageText");
+  assert.match(edit.params.text, /Страница 2 из 10[\s\S]*Кассир соблюдает[\s\S]*Зона кассы/);
+  cs = await during(() => press(ALI, `cl:${run.id}:p:-1`, message));
+  assert.match(one(cs, "editMessageText").params.text, /Страница 10 из 10[\s\S]*Ловушки проверены/);
+
+  cs = await during(() => press(ALI, `cl:${run.id}:i:0:0`, message));
+  assert.match(one(cs, "editMessageText").params.text, /1 из 55[\s\S]*✅ <b>1\.<\/b> Прилегающая территория/);
+
+  sqlite.prepare("UPDATE checklist_runs SET due_at = '2020-01-01T00:00:00Z', reminded = 0, reminder_message_id = NULL WHERE id = ?")
+    .run(run.id);
+  cs = await during(runCron);
+  const reminder = cs.find((c) => /Срок: Обход пиццерии/.test(c.params.text || ""));
+  assert.ok(reminder);
+  assert.match(reminder.params.text, /Выполнено 1 из 55[\s\S]*и ещё 49/);
+
+  for (let index = 1; index < 55; index++) {
+    const page = Math.floor(index / 6);
+    await press(index % 2 ? VALI : SAMI, `cl:${run.id}:i:${index}:${page}`, message);
+  }
+  run = await DB.prepare("SELECT * FROM checklist_runs WHERE id = ?").bind(run.id).first();
+  assert.equal(run.status, "done");
+  assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM checklist_checks WHERE run_id = ?").bind(run.id).first()).n, 55);
+  cs = await during(() => msg(ALI, "/checklists", { thread: 88 }));
+  assert.match(texts(cs)[0], /Обход пиццерии[\s\S]*✅ выполнен[\s\S]*08:30[\s\S]*и ещё 50/);
+
+  // Готовый шаблон создаётся один раз и не затирает последующие настройки администратора.
+  sqlite.prepare("UPDATE checklist_templates SET start_time = '09:15' WHERE id = ?").run(template.id);
+  await runCron();
+  assert.equal((await DB.prepare("SELECT start_time FROM checklist_templates WHERE id = ?").bind(template.id).first()).start_time,
+    "09:15");
+  delete env.CHECKLIST_TOPIC;
+});

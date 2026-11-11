@@ -4,6 +4,7 @@ import { handleAdminEdit } from "./adminedit.js";
 import { handleReportMessage } from "./reports.js";
 import { handleExchangeCommand, handleExchangeMessage, onExchangeButton } from "./exchanges.js";
 import { handleImportantMessage, onImportantButton } from "./important.js";
+import { handleChecklistCommand, onChecklistButton } from "./checklists.js";
 import { handleRepairCommand, handleRepairMessage, onRepairButton } from "./repairs.js";
 import { acceptSubmission, closeTask, publishTask, registerRequest } from "./services.js";
 import { taskSummary } from "./stats.js";
@@ -17,6 +18,7 @@ const HELP_MEMBER = `🤖 <b>Команды бота</b>
 
 <b>Для участников</b>
 /tasks — открытые задания в этой теме
+/checklists — чек-листы открытия и закрытия, их расписание и статус
 /info — правила и описание темы
 /faq — частые вопросы темы
 /ask <i>текст</i> — задать вопрос администратору
@@ -35,6 +37,9 @@ const HELP_ADMIN = `
 /faq_del <i>ключевое слово</i> — удалить автоответ
 /task <i>название | описание | дедлайн</i> — новое задание в этой теме
    дедлайн: <code>25.10.2026 18:00</code> или <code>25.10</code>
+/checklist_set <i>открытие 09:00 45 | пункт 1; пункт 2</i> — чек-лист и расписание
+/checklist <i>открытие</i> — опубликовать сейчас, /checklist_cancel <i>открытие</i> — отменить
+/checklist_off <i>открытие</i> — выключить расписание, /checklist_on <i>открытие</i> — включить
 /photo_topic — сделать текущую тему темой фото-исправлений (<code>/photo_topic off</code> — выключить)
 Не согласны с фото-исправлением — ответьте (reply) на альбом словом <code>вернуть</code> (можно с причиной: <code>вернуть плохо видно</code>). Бот удалит ваше сообщение и вернёт фото в работу
 В теме поломок: <code>/kw_add слово</code> / <code>/kw_del слово</code> — слова, на которые бот реагирует
@@ -111,6 +116,7 @@ async function handleCommand(ctx, msg, { cmd, args }) {
   const threadId = threadOf(msg);
   const admin = isAdmin(ctx, msg.from);
 
+  if (await handleChecklistCommand(ctx, msg, cmd, args, admin)) return;
   if (await handleRepairCommand(ctx, msg, cmd, args, admin)) return;
   if (await handleExchangeCommand(ctx, msg, cmd)) return;
 
@@ -313,7 +319,9 @@ async function autoAnswer(ctx, msg) {
 
 export async function handleGroupCallback(ctx, call) {
   const [kind, id] = call.data.split(":");
-  if (kind === "im") {
+  if (kind === "cl") {
+    await onChecklistButton(ctx, call);
+  } else if (kind === "im") {
     await onImportantButton(ctx, call);
   } else if (kind === "ex") {
     await onExchangeButton(ctx, call);
